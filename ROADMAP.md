@@ -1,39 +1,44 @@
 # go-adbtest Roadmap
 
+Checked items below are implemented in local commits; the complete local build
+still requires the final council audit. Detailed status and recovery notes live
+in [docs/work-breakdown.md](docs/work-breakdown.md) and
+[docs/session.md](docs/session.md).
+
 ## Phase 1: Foundation — `adb/` package
 > ADB command wrapper. Everything else depends on this.
 
-- [ ] `adb.Client` struct with serial and path auto-detection
-- [ ] `Shell`, `Install`, `Push`, `Pull`, `Forward` methods
-- [ ] `Devices()`, `WaitForDevice()`, `Screencap()`
-- [ ] `testing.TB` helper variants (`ShellOrFail`, etc.)
-- [ ] Unit tests
+- [x] `adb.Client` struct with serial and path auto-detection
+- [x] `Shell`, `Install`, `Push`, `Pull`, `Forward` methods
+- [x] `Devices()`, `WaitForDevice()`, `Screencap()`
+- [x] `testing.TB` helper variants (`ShellOrFail`, etc.)
+- [x] Unit tests
 
 ## Phase 2: Emulator Lifecycle — `emulator/` package
 > Boot, monitor, and kill emulators.
 
-- [ ] `Config` struct with AVD, GPU, headless, wipe options
-- [ ] `Start` — launch emulator process, detect serial
-- [ ] `WaitForBoot` — poll `sys.boot_completed`
-- [ ] `Kill` — graceful shutdown with SIGKILL fallback
-- [ ] Unit tests
+- [x] `Config` struct with AVD, GPU, headless, wipe options
+- [x] `Start` — launch emulator process, detect serial
+- [x] `WaitForBoot` — poll `sys.boot_completed`
+- [x] `Kill` — graceful shutdown with SIGKILL fallback
+- [x] Unit tests
 
 ## Phase 3: Native UI — `ui/` package
 > Interact with Android's native UI via uiautomator.
 
-- [ ] `parse.go` — XML parsing, element search by text/ID/regex
-- [ ] `ui.go` — `TapOnText`, `WaitForText`, `AssertVisible`, `AssertGone`
-- [ ] Fallback: `/dev/tty` → `/sdcard/ui.xml` dump strategy
-- [ ] Unit tests (XML parsing with fixtures)
+- [x] `parse.go` — XML parsing, element search by text/ID/regex
+- [x] `ui.go` — `TapOnText`, `WaitForText`, `AssertVisible`, `AssertGone`
+- [x] Fallback: `/dev/tty` → `/sdcard/ui.xml` dump strategy
+- [x] Unit tests (XML parsing with fixtures)
 
 ## Phase 4: Chrome DevTools Protocol — `cdp/` package
 > WebView interaction via CDP over WebSocket.
 
-- [ ] `ws.go` — WebSocket connection, message routing by ID
-- [ ] `cdp.go` — `Eval`, `Click` (dispatchMouseEvent), `WaitForSelector`
-- [ ] Target discovery via `/json/list`
-- [ ] Reconnection after app restart
-- [ ] Unit tests
+- [x] `ws.go` — WebSocket connection, message routing by ID
+- [x] `cdp.go` — `Eval`, `Click` (dispatchMouseEvent), `WaitForSelector`
+- [x] Target discovery via `/json/list`
+- [x] Reconnection after app restart
+- [x] Unit tests
 
 ## Phase 5: Permissions — `permissions/` package
 > Handle Android runtime permission dialogs.
