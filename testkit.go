@@ -53,6 +53,9 @@ type Config struct {
 	// MemoryMB overrides owned-AVD RAM in megabytes. Zero uses its setting;
 	// non-zero values must be between 1536 and 8192.
 	MemoryMB int
+	// Acceleration selects owned-AVD VM acceleration: "auto", "on", or "off".
+	// Empty uses the emulator default; "on" fails if no hypervisor is usable.
+	Acceleration string
 	// NoAudio disables audio for an owned AVD.
 	NoAudio bool
 	// WipeData wipes an owned AVD before boot.
@@ -71,18 +74,20 @@ type Config struct {
 
 // HeadlessAVD returns a conservative starting configuration for an owned AVD.
 // It caps the emulator at two virtual CPUs, disables the window, audio, and
-// snapshots, and lets the emulator choose the graphics backend. It deliberately
-// leaves WipeData false and RAM image-managed. Callers may override any field
-// before passing the configuration to Setup.
+// snapshots, requires VM acceleration, and lets the emulator choose the
+// graphics backend. It deliberately leaves WipeData false and RAM
+// image-managed. Callers may override any field before passing the
+// configuration to Setup.
 func HeadlessAVD(avd, apk string) Config {
 	return Config{
-		AVD:        avd,
-		APK:        apk,
-		Headless:   true,
-		GPU:        "auto",
-		Cores:      2,
-		NoAudio:    true,
-		NoSnapshot: true,
+		AVD:          avd,
+		APK:          apk,
+		Headless:     true,
+		GPU:          "auto",
+		Cores:        2,
+		Acceleration: "on",
+		NoAudio:      true,
+		NoSnapshot:   true,
 	}
 }
 
@@ -276,15 +281,16 @@ func setupWithDependencies(cfg Config, deps *testkitDependencies) (*Device, erro
 
 	if cfg.AVD != "" {
 		instance, startErr := deps.startEmulator(emulator.Config{
-			AVD:        cfg.AVD,
-			Headless:   cfg.Headless,
-			GPU:        cfg.GPU,
-			Cores:      cfg.Cores,
-			MemoryMB:   cfg.MemoryMB,
-			NoAudio:    cfg.NoAudio,
-			WipeData:   cfg.WipeData,
-			NoSnapshot: cfg.NoSnapshot,
-			Timeout:    cfg.BootTimeout,
+			AVD:          cfg.AVD,
+			Headless:     cfg.Headless,
+			GPU:          cfg.GPU,
+			Cores:        cfg.Cores,
+			MemoryMB:     cfg.MemoryMB,
+			Acceleration: cfg.Acceleration,
+			NoAudio:      cfg.NoAudio,
+			WipeData:     cfg.WipeData,
+			NoSnapshot:   cfg.NoSnapshot,
+			Timeout:      cfg.BootTimeout,
 		})
 		if instance != nil {
 			device.Emulator = instance
@@ -385,6 +391,7 @@ func normalizeConfig(cfg Config) (Config, error) {
 	cfg.AppProcess = strings.TrimSpace(cfg.AppProcess)
 	cfg.AppActivity = strings.TrimSpace(cfg.AppActivity)
 	cfg.GPU = strings.TrimSpace(cfg.GPU)
+	cfg.Acceleration = strings.TrimSpace(cfg.Acceleration)
 
 	if (cfg.AVD == "") == (cfg.Serial == "") {
 		return Config{}, errors.New("exactly one of AVD or Serial is required")
@@ -404,13 +411,17 @@ func normalizeConfig(cfg Config) (Config, error) {
 	if cfg.MemoryMB != 0 && (cfg.MemoryMB < 1536 || cfg.MemoryMB > 8192) {
 		return Config{}, fmt.Errorf("MemoryMB must be between 1536 and 8192, got %d", cfg.MemoryMB)
 	}
+	if cfg.Acceleration != "" && cfg.Acceleration != "auto" && cfg.Acceleration != "on" && cfg.Acceleration != "off" {
+		return Config{}, fmt.Errorf("acceleration must be auto, on, or off, got %q", cfg.Acceleration)
+	}
 	if cfg.CDPPort < 0 || cfg.CDPPort > 65535 {
 		return Config{}, fmt.Errorf("CDPPort must be between 1 and 65535, got %d", cfg.CDPPort)
 	}
 	if cfg.Serial != "" && (cfg.Headless || cfg.GPU != "" || cfg.Cores != 0 || cfg.MemoryMB != 0 ||
+		cfg.Acceleration != "" ||
 		cfg.NoAudio || cfg.WipeData || cfg.NoSnapshot) {
 		return Config{}, errors.New(
-			"headless, GPU, Cores, MemoryMB, NoAudio, WipeData, and NoSnapshot apply only when AVD is set",
+			"headless, GPU, Cores, MemoryMB, Acceleration, NoAudio, WipeData, and NoSnapshot apply only when AVD is set",
 		)
 	}
 	if cfg.AppPackage != "" {

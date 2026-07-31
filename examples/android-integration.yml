@@ -60,6 +60,7 @@ jobs:
           emulator-options: >-
             -no-window
             -gpu auto
+            -accel on
             -no-audio
             -no-boot-anim
             -no-snapshot

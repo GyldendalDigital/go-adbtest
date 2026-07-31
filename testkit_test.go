@@ -144,13 +144,14 @@ func avdConfig() Config {
 func TestHeadlessAVDUsesConservativeOwnedEmulatorProfile(t *testing.T) {
 	got := HeadlessAVD("Pixel_7", testAPK)
 	want := Config{
-		AVD:        "Pixel_7",
-		APK:        testAPK,
-		Headless:   true,
-		GPU:        "auto",
-		Cores:      2,
-		NoAudio:    true,
-		NoSnapshot: true,
+		AVD:          "Pixel_7",
+		APK:          testAPK,
+		Headless:     true,
+		GPU:          "auto",
+		Cores:        2,
+		Acceleration: "on",
+		NoAudio:      true,
+		NoSnapshot:   true,
 	}
 	if got != want {
 		t.Fatalf("HeadlessAVD() = %+v, want %+v", got, want)
@@ -184,21 +185,22 @@ func TestNormalizeConfigAppliesDefaultsWithoutChangingBools(t *testing.T) {
 
 func TestNormalizeConfigPreservesExplicitValues(t *testing.T) {
 	cfg := Config{
-		AVD:         " Pixel_8 ",
-		APK:         " app.apk ",
-		AppPackage:  " com.example.app ",
-		AppProcess:  " :webview ",
-		AppActivity: " .MainActivity ",
-		Headless:    true,
-		GPU:         " host ",
-		Cores:       3,
-		MemoryMB:    2048,
-		NoAudio:     true,
-		WipeData:    true,
-		NoSnapshot:  true,
-		BootTimeout: 45 * time.Second,
-		AppTimeout:  12 * time.Second,
-		CDPPort:     9333,
+		AVD:          " Pixel_8 ",
+		APK:          " app.apk ",
+		AppPackage:   " com.example.app ",
+		AppProcess:   " :webview ",
+		AppActivity:  " .MainActivity ",
+		Headless:     true,
+		GPU:          " host ",
+		Cores:        3,
+		MemoryMB:     2048,
+		Acceleration: " off ",
+		NoAudio:      true,
+		WipeData:     true,
+		NoSnapshot:   true,
+		BootTimeout:  45 * time.Second,
+		AppTimeout:   12 * time.Second,
+		CDPPort:      9333,
 	}
 	got, err := normalizeConfig(cfg)
 	if err != nil {
@@ -206,7 +208,7 @@ func TestNormalizeConfigPreservesExplicitValues(t *testing.T) {
 	}
 	if got.AVD != "Pixel_8" || got.APK != "app.apk" || got.AppPackage != testPackage ||
 		got.AppProcess != ":webview" ||
-		got.AppActivity != ".MainActivity" || got.GPU != "host" {
+		got.AppActivity != ".MainActivity" || got.GPU != "host" || got.Acceleration != "off" {
 		t.Fatalf("trimmed config = %+v", got)
 	}
 	if !got.Headless || !got.NoAudio || !got.WipeData || !got.NoSnapshot || got.Cores != 3 || got.MemoryMB != 2048 ||
@@ -233,8 +235,10 @@ func TestNormalizeConfigRejectsInvalidInput(t *testing.T) {
 		{name: "too many cores", cfg: Config{AVD: "a", APK: testAPK, Cores: 65}, want: "cores"},
 		{name: "memory below minimum", cfg: Config{AVD: "a", APK: testAPK, MemoryMB: 1535}, want: "MemoryMB"},
 		{name: "memory above maximum", cfg: Config{AVD: "a", APK: testAPK, MemoryMB: 8193}, want: "MemoryMB"},
+		{name: "invalid acceleration", cfg: Config{AVD: "a", APK: testAPK, Acceleration: "sometimes"}, want: "acceleration"},
 		{name: "AVD option with serial", cfg: Config{Serial: "s", APK: testAPK, NoAudio: true}, want: "apply only"},
 		{name: "resource cap with serial", cfg: Config{Serial: "s", APK: testAPK, Cores: 2}, want: "apply only"},
+		{name: "acceleration with serial", cfg: Config{Serial: "s", APK: testAPK, Acceleration: "on"}, want: "apply only"},
 		{name: "snapshot option with serial", cfg: Config{Serial: "s", APK: testAPK, NoSnapshot: true}, want: "apply only"},
 		{name: "invalid package", cfg: Config{AVD: "a", APK: testAPK, AppPackage: "bad package"}, want: "invalid package"},
 		{name: "invalid process", cfg: Config{AVD: "a", APK: testAPK, AppProcess: "bad process"}, want: "invalid app process"},
@@ -457,6 +461,7 @@ func TestSetupAVDOrchestratesAndAppliesEffectiveConfig(t *testing.T) {
 	cfg.Headless = true
 	cfg.Cores = 2
 	cfg.MemoryMB = 1536
+	cfg.Acceleration = "on"
 	cfg.NoAudio = true
 	cfg.WipeData = true
 	cfg.NoSnapshot = true
@@ -474,6 +479,7 @@ func TestSetupAVDOrchestratesAndAppliesEffectiveConfig(t *testing.T) {
 	}
 	if emulatorConfig.AVD != cfg.AVD || emulatorConfig.GPU != defaultGPU || !emulatorConfig.Headless ||
 		emulatorConfig.Cores != 2 || emulatorConfig.MemoryMB != 1536 ||
+		emulatorConfig.Acceleration != "on" ||
 		!emulatorConfig.NoAudio || !emulatorConfig.WipeData || !emulatorConfig.NoSnapshot ||
 		emulatorConfig.Timeout != defaultBootTimeout {
 		t.Fatalf("emulator config = %+v", emulatorConfig)

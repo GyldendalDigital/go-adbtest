@@ -38,6 +38,9 @@ type Config struct {
 	// MemoryMB overrides the AVD's RAM in megabytes. Zero uses the AVD setting;
 	// non-zero values must be between 1536 and 8192.
 	MemoryMB int
+	// Acceleration selects VM acceleration: "auto", "on", or "off". Empty uses
+	// the emulator default. "on" fails startup when the host hypervisor is unusable.
+	Acceleration string
 	// NoAudio adds the emulator's -no-audio option.
 	NoAudio bool
 	// WipeData starts the emulator with -wipe-data.
@@ -68,6 +71,8 @@ type Instance struct {
 }
 
 // Start boots an emulator with the given config. Blocks until boot_completed=1.
+//
+//nolint:gocritic // Config is a public value-style options struct by design.
 func Start(cfg Config) (*Instance, error) {
 	return startWithDependencies(cfg, productionStartDependencies())
 }
@@ -94,7 +99,9 @@ func productionStartDependencies() startDependencies {
 	}
 }
 
+//nolint:gocritic // Copying keeps normalization from mutating caller-owned options.
 func normalizeConfig(cfg Config) (Config, error) {
+	cfg.Acceleration = strings.TrimSpace(cfg.Acceleration)
 	if strings.TrimSpace(cfg.AVD) == "" {
 		return Config{}, fmt.Errorf("emulator: AVD is required")
 	}
@@ -112,12 +119,16 @@ func normalizeConfig(cfg Config) (Config, error) {
 			cfg.MemoryMB,
 		)
 	}
+	if cfg.Acceleration != "" && cfg.Acceleration != "auto" && cfg.Acceleration != "on" && cfg.Acceleration != "off" {
+		return Config{}, fmt.Errorf("emulator: acceleration must be auto, on, or off, got %q", cfg.Acceleration)
+	}
 	if cfg.Timeout == 0 {
 		cfg.Timeout = defaultBootTimeout
 	}
 	return cfg, nil
 }
 
+//nolint:gocritic // The test seam mirrors Start's public value-style API.
 func startWithDependencies(cfg Config, deps startDependencies) (*Instance, error) {
 	cfg, err := normalizeConfig(cfg)
 	if err != nil {
@@ -330,6 +341,8 @@ func (i *Instance) IsRunning() bool {
 }
 
 // buildArgs composes emulator command-line flags from config.
+//
+//nolint:gocritic // Keeping a value mirrors Config's public value-style API.
 func buildArgs(cfg Config) []string {
 	args := []string{"-avd", cfg.AVD, "-no-boot-anim"}
 
@@ -344,6 +357,9 @@ func buildArgs(cfg Config) []string {
 	}
 	if cfg.MemoryMB > 0 {
 		args = append(args, "-memory", strconv.Itoa(cfg.MemoryMB))
+	}
+	if cfg.Acceleration != "" {
+		args = append(args, "-accel", cfg.Acceleration)
 	}
 	if cfg.NoAudio {
 		args = append(args, "-no-audio")

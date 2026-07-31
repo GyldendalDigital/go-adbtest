@@ -15,14 +15,15 @@ import (
 
 func TestBuildArgs_AllOptions(t *testing.T) {
 	cfg := Config{
-		AVD:        "Pixel_7",
-		Headless:   true,
-		GPU:        "auto",
-		Cores:      2,
-		MemoryMB:   1536,
-		NoAudio:    true,
-		WipeData:   true,
-		NoSnapshot: true,
+		AVD:          "Pixel_7",
+		Headless:     true,
+		GPU:          "auto",
+		Cores:        2,
+		MemoryMB:     1536,
+		Acceleration: "on",
+		NoAudio:      true,
+		WipeData:     true,
+		NoSnapshot:   true,
 	}
 
 	args := buildArgs(cfg)
@@ -38,6 +39,8 @@ func TestBuildArgs_AllOptions(t *testing.T) {
 		"2":             true,
 		"-memory":       true,
 		"1536":          true,
+		"-accel":        true,
+		"on":            true,
 		"-no-audio":     true,
 		"-wipe-data":    true,
 		"-no-snapshot":  true,
@@ -108,6 +111,16 @@ func TestNormalizeConfig(t *testing.T) {
 		}
 	})
 
+	t.Run("trims acceleration", func(t *testing.T) {
+		cfg, err := normalizeConfig(Config{AVD: "Test", Acceleration: " on "})
+		if err != nil {
+			t.Fatalf("normalizeConfig() error: %v", err)
+		}
+		if cfg.Acceleration != "on" {
+			t.Fatalf("Acceleration = %q, want on", cfg.Acceleration)
+		}
+	})
+
 	for _, tc := range []struct {
 		name string
 		cfg  Config
@@ -119,6 +132,7 @@ func TestNormalizeConfig(t *testing.T) {
 		{name: "too many cores", cfg: Config{AVD: "Test", Cores: 65}},
 		{name: "memory below minimum", cfg: Config{AVD: "Test", MemoryMB: 1535}},
 		{name: "memory above maximum", cfg: Config{AVD: "Test", MemoryMB: 8193}},
+		{name: "invalid acceleration", cfg: Config{AVD: "Test", Acceleration: "maybe"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if _, err := normalizeConfig(tc.cfg); err == nil {

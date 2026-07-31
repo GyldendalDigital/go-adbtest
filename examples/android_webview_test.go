@@ -154,6 +154,7 @@ func TestExampleConfigurationModes(t *testing.T) {
 					t.Fatalf("unexpected AVD config: %+v", config)
 				}
 				if !config.Headless || !config.NoAudio || config.WipeData || !config.NoSnapshot ||
+					config.Acceleration != "on" ||
 					config.GPU != "auto" || config.Cores != 2 || config.MemoryMB != 0 {
 					t.Fatalf("safe AVD defaults were not applied: %+v", config)
 				}
@@ -165,18 +166,20 @@ func TestExampleConfigurationModes(t *testing.T) {
 		{
 			name: "owned AVD explicit overrides",
 			env: mergeEnvironment(base, map[string]string{
-				"ADBTEST_AVD":         "Pixel_7",
-				"ADBTEST_CORES":       "3",
-				"ADBTEST_MEMORY_MB":   "2048",
-				"ADBTEST_HEADLESS":    "false",
-				"ADBTEST_NO_AUDIO":    "false",
-				"ADBTEST_WIPE_DATA":   "true",
-				"ADBTEST_NO_SNAPSHOT": "false",
-				"ADBTEST_GPU":         "swiftshader",
+				"ADBTEST_AVD":          "Pixel_7",
+				"ADBTEST_CORES":        "3",
+				"ADBTEST_MEMORY_MB":    "2048",
+				"ADBTEST_ACCELERATION": "auto",
+				"ADBTEST_HEADLESS":     "false",
+				"ADBTEST_NO_AUDIO":     "false",
+				"ADBTEST_WIPE_DATA":    "true",
+				"ADBTEST_NO_SNAPSHOT":  "false",
+				"ADBTEST_GPU":          "swiftshader",
 			}),
 			assert: func(t *testing.T, config adbtest.Config) {
 				t.Helper()
 				if config.Headless || config.NoAudio || !config.WipeData || config.NoSnapshot ||
+					config.Acceleration != "auto" ||
 					config.GPU != "swiftshader" || config.Cores != 3 || config.MemoryMB != 2048 {
 					t.Fatalf("explicit AVD overrides were not applied: %+v", config)
 				}
@@ -272,11 +275,29 @@ func TestExampleConfigurationRejectsInvalidResourceSettings(t *testing.T) {
 			want: "ADBTEST_MEMORY_MB",
 		},
 		{
+			name: "invalid acceleration mode",
+			env: map[string]string{
+				"ADBTEST_APK":          apkPath,
+				"ADBTEST_AVD":          "small_phone_api_34",
+				"ADBTEST_ACCELERATION": "sometimes",
+			},
+			want: "ADBTEST_ACCELERATION",
+		},
+		{
 			name: "AVD resource with serial",
 			env: map[string]string{
 				"ADBTEST_APK":    apkPath,
 				"ADBTEST_SERIAL": "emulator-5554",
 				"ADBTEST_CORES":  "2",
+			},
+			want: "only valid with ADBTEST_AVD",
+		},
+		{
+			name: "acceleration with serial",
+			env: map[string]string{
+				"ADBTEST_APK":          apkPath,
+				"ADBTEST_SERIAL":       "emulator-5554",
+				"ADBTEST_ACCELERATION": "on",
 			},
 			want: "only valid with ADBTEST_AVD",
 		},
@@ -384,6 +405,14 @@ func loadExampleEnvironment(getenv func(string) string) (adbtest.Config, fixture
 		if gpu := value("ADBTEST_GPU"); gpu != "" {
 			config.GPU = gpu
 		}
+		if acceleration := value("ADBTEST_ACCELERATION"); acceleration != "" {
+			if acceleration != "auto" && acceleration != "on" && acceleration != "off" {
+				return adbtest.Config{}, fixtureConfig{}, "", fmt.Errorf(
+					"ADBTEST_ACCELERATION: must be auto, on, or off",
+				)
+			}
+			config.Acceleration = acceleration
+		}
 		config.Cores, err = intWithDefault(value("ADBTEST_CORES"), config.Cores, 0, 64)
 		if err != nil {
 			return adbtest.Config{}, fixtureConfig{}, "", fmt.Errorf("ADBTEST_CORES: %w", err)
@@ -413,6 +442,7 @@ func loadExampleEnvironment(getenv func(string) string) (adbtest.Config, fixture
 		}
 	} else {
 		for _, name := range []string{
+			"ADBTEST_ACCELERATION",
 			"ADBTEST_GPU",
 			"ADBTEST_CORES",
 			"ADBTEST_MEMORY_MB",

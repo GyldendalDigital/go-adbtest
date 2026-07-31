@@ -62,6 +62,7 @@ Optional settings are:
 | `ADBTEST_GPU` | `auto` | AVD GPU mode; valid only with `ADBTEST_AVD`. |
 | `ADBTEST_CORES` | `2` | Owned-AVD virtual CPU cap; `0` uses the AVD setting. |
 | `ADBTEST_MEMORY_MB` | AVD/system image | Advanced RAM override (`0` or 1536–8192); Android may enforce a higher minimum. |
+| `ADBTEST_ACCELERATION` | `on` | VM acceleration mode (`auto`, `on`, or `off`); `on` fails fast without a usable hypervisor. |
 | `ADBTEST_HEADLESS` | `true` | Start an owned AVD without a window. |
 | `ADBTEST_NO_AUDIO` | `true` | Disable audio for an owned AVD. |
 | `ADBTEST_WIPE_DATA` | `false` | Wipe an owned AVD before starting it. |
@@ -124,7 +125,9 @@ AVD must already exist: Setup starts, waits for, owns, and stops it, but does
 not download a system image or create an AVD. Prefer a 720×1280 `small_phone`
 profile with a non-Play-Store `google_apis` x86_64 image. On a runner that
 cannot use automatic graphics selection, set `ADBTEST_GPU=swiftshader`;
-`swiftshader_indirect` is deprecated.
+`swiftshader_indirect` is deprecated. The safe profile also uses `-accel on`,
+so it refuses to start rather than silently using CPU emulation when the host
+hypervisor is unavailable.
 
 In serial mode, go-adbtest attaches to an already running emulator or device and
 does not stop it during teardown. Do not set the AVD-only variables in this mode:
