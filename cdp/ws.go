@@ -11,7 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"nhooyr.io/websocket"
+	"github.com/coder/websocket"
 )
 
 const (
@@ -58,8 +58,9 @@ func (e *cdpError) Error() string {
 	return fmt.Sprintf("CDP protocol error %d: %s", e.Code, e.Message)
 }
 
-// Connect establishes a CDP connection. Discovers the WebSocket URL via
-// http://localhost:<port>/json/list (first target).
+// Connect establishes a CDP connection. It discovers the WebSocket URL via
+// http://localhost:<port>/json/list, preferring the first page target and then
+// the first target with a WebSocket URL.
 func Connect(localPort int) (*Conn, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), defaultConnectTimeout)
 	defer cancel()
@@ -135,7 +136,7 @@ func ConnectDirectContext(ctx context.Context, wsURL string) (*Conn, error) {
 	return connectWS(ctx, wsURL)
 }
 
-// Send sends a CDP command and waits for its response.
+// Send sends a CDP command and waits up to 30 seconds for its response.
 func (c *Conn) Send(method string, params map[string]any) (json.RawMessage, error) {
 	return c.SendWithTimeout(method, params, 30*time.Second)
 }
@@ -156,6 +157,9 @@ func (c *Conn) SendWithTimeout(method string, params map[string]any, timeout tim
 func (c *Conn) SendContext(ctx context.Context, method string, params map[string]any) (json.RawMessage, error) {
 	if ctx == nil {
 		return nil, fmt.Errorf("CDP %s: nil context", method)
+	}
+	if c == nil || c.ws == nil {
+		return nil, fmt.Errorf("CDP %s: connection is not initialized", method)
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("CDP %s: %w", method, err)
@@ -192,9 +196,7 @@ func (c *Conn) SendContext(ctx context.Context, method string, params map[string
 	}()
 
 	if err := c.ws.Write(ctx, websocket.MessageText, data); err != nil {
-		connectionErr := fmt.Errorf("CDP connection write failed: %w", err)
-		c.terminate(connectionErr)
-		return nil, fmt.Errorf("CDP %s: %w", method, connectionErr)
+		return nil, fmt.Errorf("CDP %s: %w", method, c.handleWriteFailure(ctx, err))
 	}
 
 	select {
@@ -208,6 +210,23 @@ func (c *Conn) SendContext(ctx context.Context, method string, params map[string
 	}
 }
 
+func (c *Conn) handleWriteFailure(ctx context.Context, writeErr error) error {
+	// Cancellation before the write completes is scoped to this command. The
+	// WebSocket implementation will close itself if cancellation interrupted an
+	// active frame; cancellation while waiting for its write lock leaves the
+	// connection healthy and must not poison unrelated commands.
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
+	}
+
+	connectionErr := fmt.Errorf("CDP connection write failed: %w", writeErr)
+	c.terminate(connectionErr)
+	if closeErr := c.closeNow(); closeErr != nil {
+		return errors.Join(connectionErr, fmt.Errorf("close failed CDP connection: %w", closeErr))
+	}
+	return connectionErr
+}
+
 // Close closes the WebSocket connection. It is safe to call concurrently and
 // repeatedly.
 func (c *Conn) Close() error {
@@ -219,6 +238,9 @@ func (c *Conn) closeNow() error {
 }
 
 func (c *Conn) close(graceful bool) error {
+	if c == nil || c.ws == nil {
+		return nil
+	}
 	c.terminate(errConnectionClosed)
 	c.wsCloseOnce.Do(func() {
 		if graceful {
@@ -295,7 +317,10 @@ func (c *Conn) readLoop() {
 }
 
 func connectWS(ctx context.Context, wsURL string) (*Conn, error) {
-	ws, _, err := websocket.Dial(ctx, wsURL, nil)
+	ws, response, err := websocket.Dial(ctx, wsURL, nil)
+	if response != nil && response.Body != nil {
+		_ = response.Body.Close()
+	}
 	if err != nil {
 		return nil, fmt.Errorf("websocket dial %s: %w", wsURL, err)
 	}
@@ -307,6 +332,7 @@ func connectWS(ctx context.Context, wsURL string) (*Conn, error) {
 		pending: make(map[int64]chan commandResponse),
 		done:    make(chan struct{}),
 	}
+	//nolint:gosec // The connection owns this reader until Close or transport failure.
 	go conn.readLoop()
 	return conn, nil
 }
@@ -325,7 +351,7 @@ func discoverWSURL(ctx context.Context, port int) (string, error) {
 		return "", err
 	}
 	url := fmt.Sprintf("http://localhost:%d/json/list", port)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, http.NoBody)
 	if err != nil {
 		return "", fmt.Errorf("create CDP target request: %w", err)
 	}

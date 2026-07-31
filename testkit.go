@@ -39,6 +39,9 @@ type Config struct {
 	APK string
 	// AppPackage is the Android application ID. When empty, aapt inspects APK.
 	AppPackage string
+	// AppProcess optionally selects the Android process hosting the debuggable
+	// WebView. Empty selects AppPackage; a colon-prefixed name is relative to it.
+	AppProcess string
 	// AppActivity optionally identifies the launcher activity or full component.
 	AppActivity string
 	// Headless starts an owned AVD without a window.
@@ -157,7 +160,7 @@ type testkitDependencies struct {
 	waitForBoot    func(context.Context, *adb.Client) error
 	runADB         func(context.Context, *adb.Client, ...string) (string, error)
 	shellADB       func(context.Context, *adb.Client, string) (string, error)
-	newCDP         func(context.Context, *adb.Client, string, int) (*cdp.Client, error)
+	newCDP         func(context.Context, *adb.Client, string, string, int) (*cdp.Client, error)
 	reconnectCDP   func(context.Context, *cdp.Client) error
 	closeCDP       func(context.Context, *cdp.Client) error
 	killEmulator   func(*emulator.Instance) error
@@ -181,7 +184,7 @@ func productionTestkitDependencies() testkitDependencies {
 		shellADB: func(ctx context.Context, client *adb.Client, command string) (string, error) {
 			return client.ShellContext(ctx, command)
 		},
-		newCDP: cdp.NewClientContext,
+		newCDP: cdp.NewClientForProcessContext,
 		reconnectCDP: func(ctx context.Context, client *cdp.Client) error {
 			return client.ReconnectContext(ctx)
 		},
@@ -231,6 +234,11 @@ func setupWithDependencies(cfg Config, deps *testkitDependencies) (*Device, erro
 		}
 		cfg.AppActivity = component
 	}
+	appProcess, processErr := normalizeAppProcess(cfg.AppPackage, cfg.AppProcess)
+	if processErr != nil {
+		return nil, fmt.Errorf("app process: %w", processErr)
+	}
+	cfg.AppProcess = appProcess
 
 	device := &Device{Config: cfg, deps: *deps}
 	fail := func(setupErr error) (*Device, error) {
@@ -319,7 +327,13 @@ func setupWithDependencies(cfg Config, deps *testkitDependencies) (*Device, erro
 		cancelApp()
 		return fail(err)
 	}
-	cdpClient, cdpErr := deps.newCDP(appCtx, device.ADB, cfg.AppPackage, cfg.CDPPort)
+	cdpClient, cdpErr := deps.newCDP(
+		appCtx,
+		device.ADB,
+		cfg.AppPackage,
+		cfg.AppProcess,
+		cfg.CDPPort,
+	)
 	if cdpClient != nil {
 		device.CDP = cdpClient
 	}
@@ -340,6 +354,7 @@ func normalizeConfig(cfg Config) (Config, error) {
 	cfg.Serial = strings.TrimSpace(cfg.Serial)
 	cfg.APK = strings.TrimSpace(cfg.APK)
 	cfg.AppPackage = strings.TrimSpace(cfg.AppPackage)
+	cfg.AppProcess = strings.TrimSpace(cfg.AppProcess)
 	cfg.AppActivity = strings.TrimSpace(cfg.AppActivity)
 	cfg.GPU = strings.TrimSpace(cfg.GPU)
 
@@ -366,6 +381,9 @@ func normalizeConfig(cfg Config) (Config, error) {
 			return Config{}, fmt.Errorf("AppPackage: %w", err)
 		}
 	}
+	if _, err := normalizeAppProcess(cfg.AppPackage, cfg.AppProcess); err != nil {
+		return Config{}, fmt.Errorf("AppProcess: %w", err)
+	}
 	if strings.ContainsAny(cfg.AppActivity, "\r\n") {
 		return Config{}, errors.New("AppActivity must not contain a newline")
 	}
@@ -383,6 +401,43 @@ func normalizeConfig(cfg Config) (Config, error) {
 		cfg.GPU = defaultGPU
 	}
 	return cfg, nil
+}
+
+func normalizeAppProcess(appPackage, appProcess string) (string, error) {
+	if appProcess == "" {
+		return appPackage, nil
+	}
+	if strings.HasPrefix(appProcess, ":") {
+		if appPackage == "" {
+			// The package may still be discovered from the APK. Keep the relative
+			// form until setup has resolved it.
+			return appProcess, validateAppProcess(appProcess)
+		}
+		appProcess = appPackage + appProcess
+	}
+	if err := validateAppProcess(appProcess); err != nil {
+		return "", err
+	}
+	return appProcess, nil
+}
+
+func validateAppProcess(appProcess string) error {
+	if appProcess == "" {
+		return nil
+	}
+	if strings.HasPrefix(appProcess, ".") || strings.HasSuffix(appProcess, ".") ||
+		strings.Contains(appProcess, "..") || strings.HasSuffix(appProcess, ":") ||
+		strings.Count(appProcess, ":") > 1 {
+		return fmt.Errorf("invalid app process %q", appProcess)
+	}
+	for _, char := range appProcess {
+		if char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z' ||
+			char >= '0' && char <= '9' || char == '_' || char == '.' || char == ':' {
+			continue
+		}
+		return fmt.Errorf("invalid app process %q", appProcess)
+	}
+	return nil
 }
 
 func validateDependencies(deps *testkitDependencies) error {

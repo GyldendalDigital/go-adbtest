@@ -18,7 +18,7 @@ import (
 	"time"
 
 	"github.com/GyldendalDigital/go-adbtest/adb"
-	"nhooyr.io/websocket"
+	"github.com/coder/websocket"
 )
 
 func TestConnProtocolErrorIsReturned(t *testing.T) {
@@ -277,6 +277,7 @@ func TestConnectWithRetryHonorsOneTotalTimeout(t *testing.T) {
 }
 
 func TestContextAPIsRejectInvalidInputs(t *testing.T) {
+	//nolint:staticcheck // A defensive API test intentionally supplies nil.
 	if _, err := ConnectContext(nil, 9222); err == nil || !strings.Contains(err.Error(), "nil context") {
 		t.Fatalf("ConnectContext(nil) error = %v", err)
 	}
@@ -313,6 +314,121 @@ func TestSendContextHonorsTimeout(t *testing.T) {
 	_, err = conn.SendContext(ctx, "Never.responds", nil)
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("SendContext() error = %v, want context deadline", err)
+	}
+}
+
+func TestSendContextTimeoutDoesNotPoisonConnection(t *testing.T) {
+	srv := mockCDPServer(t, func(ctx context.Context, ws *websocket.Conn) {
+		readCDPRequest(t, ctx, ws)
+		second := readCDPRequest(t, ctx, ws)
+		writeCDPMessage(t, ctx, ws, map[string]any{
+			"id":     second.ID,
+			"result": map[string]any{"ok": true},
+		})
+	})
+	defer srv.Close()
+
+	conn, err := Connect(serverPort(t, srv))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if _, err := conn.SendContext(ctx, "Never.responds", nil); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("first SendContext() error = %v, want context deadline", err)
+	}
+	if _, err := conn.SendWithTimeout("Still.works", nil, time.Second); err != nil {
+		t.Fatalf("second Send() after caller timeout: %v", err)
+	}
+}
+
+func TestHandleWriteFailureClassifiesCallerCancellation(t *testing.T) {
+	cancelled := &Conn{pending: make(map[int64]chan commandResponse), done: make(chan struct{})}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := cancelled.handleWriteFailure(ctx, errors.New("write failed")); !errors.Is(err, context.Canceled) {
+		t.Fatalf("handleWriteFailure(cancelled) error = %v, want context cancellation", err)
+	}
+	select {
+	case <-cancelled.done:
+		t.Fatal("caller cancellation terminated the connection")
+	default:
+	}
+	if cancelled.terminalErr != nil {
+		t.Fatalf("caller cancellation terminal error = %v", cancelled.terminalErr)
+	}
+
+	failed := &Conn{pending: make(map[int64]chan commandResponse), done: make(chan struct{})}
+	writeErr := errors.New("broken transport")
+	if err := failed.handleWriteFailure(context.Background(), writeErr); !errors.Is(err, writeErr) {
+		t.Fatalf("handleWriteFailure(transport) error = %v, want write error", err)
+	}
+	select {
+	case <-failed.done:
+	default:
+		t.Fatal("genuine write failure did not terminate the connection")
+	}
+	if !errors.Is(failed.terminalErr, writeErr) {
+		t.Fatalf("genuine write failure terminal error = %v", failed.terminalErr)
+	}
+}
+
+func TestEvalContextRejectsMissingConnection(t *testing.T) {
+	for _, client := range []*Client{nil, {}} {
+		if value, err := client.EvalContext(context.Background(), "1+1"); err == nil {
+			t.Fatalf("EvalContext() = %q, nil; want missing connection error", value)
+		}
+	}
+	if _, err := (&Conn{}).SendContext(context.Background(), "Runtime.evaluate", nil); err == nil {
+		t.Fatal("zero Conn.SendContext() error = nil, want uninitialized connection error")
+	}
+}
+
+func TestWaitHelpersHonorOneTotalDeadline(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		wait func(context.Context, *Client) error
+	}{
+		{
+			name: "selector",
+			wait: func(ctx context.Context, client *Client) error {
+				return client.waitForSelectorContext(ctx, "#never")
+			},
+		},
+		{
+			name: "text",
+			wait: func(ctx context.Context, client *Client) error {
+				_, err := client.waitForTextContext(ctx, "#never", "missing")
+				return err
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			srv := mockCDPServer(t, func(ctx context.Context, ws *websocket.Conn) {
+				readCDPRequest(t, ctx, ws)
+				_, _, _ = ws.Read(ctx)
+			})
+			defer srv.Close()
+
+			conn, err := Connect(serverPort(t, srv))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer conn.Close()
+
+			ctx, cancel := context.WithTimeout(context.Background(), 75*time.Millisecond)
+			defer cancel()
+			started := time.Now()
+			err = test.wait(ctx, &Client{Conn: conn})
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("wait error = %v, want context deadline", err)
+			}
+			if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+				t.Fatalf("wait took %v with a 75ms deadline", elapsed)
+			}
+		})
 	}
 }
 
@@ -370,6 +486,10 @@ func TestNewClientContextPollsPIDAndReconnects(t *testing.T) {
 	t.Setenv("FAKE_ADB_STATE", statePath)
 	adbClient := fakeCDPADB(t, `
 if [ "${1-}" = "shell" ]; then
+    if [ "${2-}" = "cat /proc/net/unix" ]; then
+        printf '%s\n' '00000000: 00000002 00000000 00010000 0001 01 4242 @webview_devtools_remote_4242'
+        exit 0
+    fi
     count=0
     if [ -f "$FAKE_ADB_STATE" ]; then
         count=$(sed -n '1p' "$FAKE_ADB_STATE")
@@ -437,7 +557,11 @@ func TestNewClientContextCleansForwardAfterReadinessTimeout(t *testing.T) {
 	adbClient := fakeCDPADB(t, `
 printf '%s\n' "$*" >> "$FAKE_ADB_LOG"
 if [ "${1-}" = "shell" ]; then
-    printf '%s\n' '4242'
+    case "${2-}" in
+        "pidof com.example.app") printf '%s\n' '4242' ;;
+        "cat /proc/net/unix") printf '%s\n' '00000000: 00000002 00000000 00010000 0001 01 4242 @webview_devtools_remote_4242' ;;
+        *) exit 97 ;;
+    esac
     exit 0
 fi
 if [ "${1-}" = "forward" ]; then
@@ -456,8 +580,12 @@ exit 97
 	if readErr != nil {
 		t.Fatal(readErr)
 	}
-	if !strings.Contains(string(logData), "forward --remove tcp:") {
-		t.Fatalf("ADB calls did not clean the forward:\n%s", logData)
+	logText := string(logData)
+	if !strings.Contains(logText, "forward --no-rebind tcp:") {
+		t.Fatalf("ADB calls did not create an exclusive forward:\n%s", logData)
+	}
+	if count := strings.Count(logText, "forward --remove tcp:"); count != 1 {
+		t.Fatalf("ADB calls removed the owned forward %d times, want 1:\n%s", count, logData)
 	}
 }
 
@@ -479,7 +607,11 @@ func TestReconnectContextFailureClearsConnectionAndCleansForward(t *testing.T) {
 	adbClient := fakeCDPADB(t, `
 printf '%s\n' "$*" >> "$FAKE_ADB_LOG"
 if [ "${1-}" = "shell" ]; then
-    printf '%s\n' '4242'
+    case "${2-}" in
+        "pidof com.example.app") printf '%s\n' '4242' ;;
+        "cat /proc/net/unix") printf '%s\n' '00000000: 00000002 00000000 00010000 0001 01 4242 @webview_devtools_remote_4242' ;;
+        *) exit 98 ;;
+    esac
     exit 0
 fi
 if [ "${1-}" = "forward" ]; then
@@ -488,10 +620,12 @@ fi
 exit 98
 `)
 	client := &Client{
-		Conn:       oldConn,
-		ADB:        adbClient,
-		LocalPort:  serverPort(t, notReadyServer),
-		AppPackage: "com.example.app",
+		Conn:          oldConn,
+		ADB:           adbClient,
+		LocalPort:     serverPort(t, notReadyServer),
+		AppPackage:    "com.example.app",
+		forwardOwned:  true,
+		forwardSocket: "webview_devtools_remote_1111",
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 75*time.Millisecond)
@@ -524,7 +658,7 @@ if [ "${1-}" = "forward" ]; then
 fi
 exit 99
 `)
-	client := &Client{ADB: adbClient, LocalPort: 9222}
+	client := &Client{ADB: adbClient, LocalPort: 9222, forwardOwned: true}
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 	started := time.Now()
@@ -545,7 +679,7 @@ if [ "${1-}" = "forward" ]; then
 fi
 exit 100
 `)
-	client := &Client{ADB: adbClient, LocalPort: 9222}
+	client := &Client{ADB: adbClient, LocalPort: 9222, forwardOwned: true}
 	err := client.Close()
 	if err == nil || !strings.Contains(err.Error(), "remove CDP port forward") || !strings.Contains(err.Error(), "remove failed") {
 		t.Fatalf("Close() error = %v, want forward removal error", err)

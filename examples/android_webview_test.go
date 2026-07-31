@@ -136,11 +136,12 @@ func TestExampleConfigurationModes(t *testing.T) {
 		{
 			name: "owned AVD",
 			env: mergeEnvironment(base, map[string]string{
-				"ADBTEST_AVD":       "Pixel_API_35",
-				"ADBTEST_HEADLESS":  "true",
-				"ADBTEST_NO_AUDIO":  "true",
-				"ADBTEST_WIPE_DATA": "true",
-				"ADBTEST_GPU":       "auto",
+				"ADBTEST_AVD":         "Pixel_API_35",
+				"ADBTEST_APP_PROCESS": ":webview",
+				"ADBTEST_HEADLESS":    "true",
+				"ADBTEST_NO_AUDIO":    "true",
+				"ADBTEST_WIPE_DATA":   "true",
+				"ADBTEST_GPU":         "auto",
 			}),
 			assert: func(t *testing.T, config adbtest.Config) {
 				t.Helper()
@@ -149,6 +150,9 @@ func TestExampleConfigurationModes(t *testing.T) {
 				}
 				if !config.Headless || !config.NoAudio || !config.WipeData {
 					t.Fatalf("AVD flags were not applied: %+v", config)
+				}
+				if config.AppProcess != ":webview" {
+					t.Fatalf("app process = %q, want :webview", config.AppProcess)
 				}
 			},
 		},
@@ -255,6 +259,7 @@ func loadExampleEnvironment(getenv func(string) string) (adbtest.Config, fixture
 		Serial:      serial,
 		APK:         apk,
 		AppPackage:  value("ADBTEST_APP_PACKAGE"),
+		AppProcess:  value("ADBTEST_APP_PROCESS"),
 		AppActivity: value("ADBTEST_APP_ACTIVITY"),
 		BootTimeout: bootTimeout,
 		AppTimeout:  appTimeout,

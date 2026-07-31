@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"nhooyr.io/websocket"
+	"github.com/coder/websocket"
 )
 
 // mockCDPServer creates a test HTTP server that:
@@ -233,6 +233,57 @@ func TestExtractValue_Exception(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "ReferenceError") {
 		t.Errorf("error = %v, want ReferenceError", err)
+	}
+}
+
+func TestExtractValue_SpecialValues(t *testing.T) {
+	tests := []struct {
+		name string
+		resp string
+		want string
+	}{
+		{
+			name: "undefined",
+			resp: `{"result":{"type":"undefined"}}`,
+			want: "undefined",
+		},
+		{
+			name: "unserializable number",
+			resp: `{"result":{"type":"number","unserializableValue":"NaN"}}`,
+			want: "NaN",
+		},
+		{
+			name: "null",
+			resp: `{"result":{"type":"object","subtype":"null","value":null}}`,
+			want: "null",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := extractValue(json.RawMessage(test.resp))
+			if err != nil {
+				t.Fatalf("extractValue() error: %v", err)
+			}
+			if got != test.want {
+				t.Fatalf("extractValue() = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestExtractValue_RejectsMalformedResults(t *testing.T) {
+	for _, resp := range []string{
+		`{}`,
+		`{"result":{}}`,
+		`{"result":{"type":"string"}}`,
+		`{"result":{"type":"undefined","value":null}}`,
+	} {
+		t.Run(resp, func(t *testing.T) {
+			if value, err := extractValue(json.RawMessage(resp)); err == nil {
+				t.Fatalf("extractValue(%s) = %q, nil; want error", resp, value)
+			}
+		})
 	}
 }
 

@@ -36,7 +36,12 @@ func (l *eventLog) joined() string {
 
 func fakeDependencies(log *eventLog) testkitDependencies {
 	client := &adb.Client{Serial: "emulator-5554", ADBPath: "/fake/adb"}
-	cdpClient := &cdp.Client{ADB: client, AppPackage: testPackage, LocalPort: defaultCDPPort}
+	cdpClient := &cdp.Client{
+		ADB:        client,
+		AppPackage: testPackage,
+		AppProcess: testPackage,
+		LocalPort:  defaultCDPPort,
+	}
 	return testkitDependencies{
 		validateAPK: func(apkPath string) error {
 			log.add("stat:" + apkPath)
@@ -88,12 +93,18 @@ func fakeDependencies(log *eventLog) testkitDependencies {
 			}
 			return "Starting: Intent", nil
 		},
-		newCDP: func(ctx context.Context, _ *adb.Client, appPackage string, port int) (*cdp.Client, error) {
-			log.add("cdp:" + appPackage)
+		newCDP: func(
+			ctx context.Context,
+			_ *adb.Client,
+			appPackage, appProcess string,
+			port int,
+		) (*cdp.Client, error) {
+			log.add("cdp:" + appPackage + ":" + appProcess)
 			if _, ok := ctx.Deadline(); !ok {
 				return nil, errors.New("CDP context has no deadline")
 			}
 			cdpClient.AppPackage = appPackage
+			cdpClient.AppProcess = appProcess
 			cdpClient.LocalPort = port
 			return cdpClient, nil
 		},
@@ -157,6 +168,7 @@ func TestNormalizeConfigPreservesExplicitValues(t *testing.T) {
 		AVD:         " Pixel_8 ",
 		APK:         " app.apk ",
 		AppPackage:  " com.example.app ",
+		AppProcess:  " :webview ",
 		AppActivity: " .MainActivity ",
 		Headless:    true,
 		GPU:         " host ",
@@ -171,6 +183,7 @@ func TestNormalizeConfigPreservesExplicitValues(t *testing.T) {
 		t.Fatalf("normalizeConfig() error: %v", err)
 	}
 	if got.AVD != "Pixel_8" || got.APK != "app.apk" || got.AppPackage != testPackage ||
+		got.AppProcess != ":webview" ||
 		got.AppActivity != ".MainActivity" || got.GPU != "host" {
 		t.Fatalf("trimmed config = %+v", got)
 	}
@@ -195,6 +208,8 @@ func TestNormalizeConfigRejectsInvalidInput(t *testing.T) {
 		{name: "large port", cfg: Config{AVD: "a", APK: testAPK, CDPPort: 65536}, want: "CDPPort"},
 		{name: "AVD option with serial", cfg: Config{Serial: "s", APK: testAPK, NoAudio: true}, want: "apply only"},
 		{name: "invalid package", cfg: Config{AVD: "a", APK: testAPK, AppPackage: "bad package"}, want: "invalid package"},
+		{name: "invalid process", cfg: Config{AVD: "a", APK: testAPK, AppProcess: "bad process"}, want: "invalid app process"},
+		{name: "multiple process separators", cfg: Config{AVD: "a", APK: testAPK, AppProcess: "app:a:b"}, want: "invalid app process"},
 		{name: "activity newline", cfg: Config{AVD: "a", APK: testAPK, AppActivity: ".Main\nInjected"}, want: "newline"},
 	}
 
@@ -421,7 +436,8 @@ func TestSetupAVDOrchestratesAndAppliesEffectiveConfig(t *testing.T) {
 	if device.Emulator == nil || device.ADB == nil || device.UI == nil || device.CDP == nil || device.Permissions == nil {
 		t.Fatalf("incomplete device: %+v", device)
 	}
-	if device.Config.AppPackage != testPackage || device.Config.AppActivity != testPackage+"/.MainActivity" {
+	if device.Config.AppPackage != testPackage || device.Config.AppProcess != testPackage ||
+		device.Config.AppActivity != testPackage+"/.MainActivity" {
 		t.Fatalf("effective app config = %+v", device.Config)
 	}
 	if emulatorConfig.AVD != cfg.AVD || emulatorConfig.GPU != defaultGPU || !emulatorConfig.Headless ||
@@ -429,13 +445,32 @@ func TestSetupAVDOrchestratesAndAppliesEffectiveConfig(t *testing.T) {
 		t.Fatalf("emulator config = %+v", emulatorConfig)
 	}
 	wantEvents := "stat:" + testAPK + "|inspect:" + testAPK + "|start:Pixel_7|new-ui|new-permissions|" +
-		"adb-run:install -r " + testAPK + "|shell:am start -W -n " + shellQuote(testPackage+"/.MainActivity") + "|cdp:" + testPackage
+		"adb-run:install -r " + testAPK + "|shell:am start -W -n " + shellQuote(testPackage+"/.MainActivity") +
+		"|cdp:" + testPackage + ":" + testPackage
 	if log.joined() != wantEvents {
 		t.Fatalf("events = %s\nwant   = %s", log.joined(), wantEvents)
 	}
 
 	if err := device.Teardown(); err != nil {
 		t.Fatalf("Teardown() error: %v", err)
+	}
+}
+
+func TestSetupNormalizesRelativeAppProcessAfterAPKInspection(t *testing.T) {
+	log := &eventLog{}
+	deps := fakeDependencies(log)
+	cfg := avdConfig()
+	cfg.AppProcess = ":webview"
+
+	device, err := setupWithDependencies(cfg, &deps)
+	if err != nil {
+		t.Fatalf("setupWithDependencies() error: %v", err)
+	}
+	defer func() { _ = device.Teardown() }()
+
+	want := testPackage + ":webview"
+	if device.Config.AppProcess != want || device.CDP.AppProcess != want {
+		t.Fatalf("app process = config %q, CDP %q, want %q", device.Config.AppProcess, device.CDP.AppProcess, want)
 	}
 }
 
@@ -604,7 +639,7 @@ func TestSetupFailureCleansEveryAcquiredResourceInOrder(t *testing.T) {
 	log := &eventLog{}
 	deps := fakeDependencies(log)
 	fakeCDP := &cdp.Client{}
-	deps.newCDP = func(context.Context, *adb.Client, string, int) (*cdp.Client, error) {
+	deps.newCDP = func(context.Context, *adb.Client, string, string, int) (*cdp.Client, error) {
 		log.add("cdp-fail")
 		return fakeCDP, errors.New("CDP unavailable")
 	}
@@ -713,7 +748,7 @@ func TestSetupFailureCleanupMatchesAcquisitionStage(t *testing.T) {
 		{
 			name: "CDP",
 			configure: func(deps *testkitDependencies, _ *eventLog) {
-				deps.newCDP = func(context.Context, *adb.Client, string, int) (*cdp.Client, error) {
+				deps.newCDP = func(context.Context, *adb.Client, string, string, int) (*cdp.Client, error) {
 					return &cdp.Client{}, errors.New("CDP failed")
 				}
 			},
