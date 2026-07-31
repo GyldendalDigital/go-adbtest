@@ -1,388 +1,148 @@
-# go-adbtest: Implementation Spec for a Go Android WebView Integration Test Library
+# go-adbtest Implementation Specification
 
-## Purpose
+This document describes the implemented contract of `go-adbtest`. The library
+drives one Android WebView application from Go tests, crossing between native
+Android UI and WebView content without relying on hard-coded screen
+coordinates.
 
-A standalone Go library that lets you write `go test` functions which drive a real Android emulator — interacting with both native UI (permission dialogs, file pickers, system chrome) and WebView content (DOM elements, JS evaluation) — using semantic text/selector matching instead of fragile coordinates.
+The module is:
 
-## Target Consumer
+```text
+github.com/GyldendalDigital/go-adbtest
+```
+
+The root package name is `adbtest`.
+
+## Intended use
 
 ```go
-import adbtest "github.com/GyldendalDigital/go-adbtest"
+package androidtest
+
+import (
+    "fmt"
+    "os"
+    "testing"
+    "time"
+
+    adbtest "github.com/GyldendalDigital/go-adbtest"
+)
 
 var device *adbtest.Device
 
 func TestMain(m *testing.M) {
     device = adbtest.Setup(adbtest.Config{
-        AVD:      "Pixel_7",
-        APK:      "bin/myapp.apk",
-        Headless: true,
-        GPU:      "swiftshader_indirect",
+        AVD:        "Pixel_7",
+        APK:        "bin/myapp.apk",
+        AppPackage: "com.example.myapp",
+        Headless:   true,
+        NoAudio:    true,
     })
+
     code := m.Run()
-    device.Teardown()
+    if err := device.Teardown(); err != nil {
+        fmt.Fprintln(os.Stderr, err)
+        if code == 0 {
+            code = 1
+        }
+    }
     os.Exit(code)
 }
 
-func TestLoginFlow(t *testing.T) {
+func TestWebViewFlow(t *testing.T) {
     device.RestartApp(t)
-    device.CDP.Click(t, "#login-btn")
-    device.UI.TapOnText(t, "While using the app", 10*time.Second) // permission
-    result := device.CDP.Eval(t, `document.getElementById("status").textContent`)
-    assert.Contains(t, result, "logged in")
+    device.CDP.Click(t, "#continue")
+    device.Permissions.Grant(t)
+    device.CDP.WaitForSelector(t, "#result", 10*time.Second)
 }
 ```
+
+`go-adbtest` is not Wails-specific. The application only needs a debuggable
+WebView with WebView debugging enabled.
 
 ## Architecture
 
-```
+```text
 go-adbtest/
-├── go.mod                    # module github.com/GyldendalDigital/go-adbtest
-├── go.sum
-├── testkit.go                # Setup/Teardown, Config, Device struct (top-level API)
-├── adb/
-│   ├── adb.go               # Core: shell, push, pull, install, forward, devices
-│   └── adb_test.go
-├── emulator/
-│   ├── emulator.go          # Start, WaitForBoot, Kill, WipeData
-│   └── emulator_test.go
-├── ui/
-│   ├── ui.go                # TapOnText, LongPressOnText, WaitForText, AssertVisible, AssertGone
-│   ├── parse.go             # uiautomator XML parsing → element bounds
-│   └── ui_test.go
-├── cdp/
-│   ├── cdp.go               # Connect, Evaluate, Click (CSS selector), WaitForSelector, DispatchMouseEvent
-│   ├── ws.go                # WebSocket lifecycle, reconnection, message routing
-│   └── cdp_test.go
-├── permissions/
-│   ├── permissions.go       # GrantPermission, DenyPermission (composed from ui.TapOnText)
-│   └── permissions_test.go
-└── examples/
-    └── wails_test.go        # Full example showing usage with a Wails app
+├── testkit.go          # package adbtest: Config, Device, Setup
+├── adb/                # context-aware adb process wrapper
+├── emulator/           # owned emulator lifecycle
+├── ui/                 # uiautomator parsing and native interaction
+├── cdp/                # CDP WebSocket transport and WebView interaction
+└── permissions/        # Android runtime-permission dialogs
 ```
 
-## Package-by-Package Specification
+Each subpackage is independently usable. The root package composes them into a
+single `Device`.
 
----
+## Root `adbtest` package
 
-### `adb/` — ADB command wrapper
-
-**File: `adb.go`**
-
-```go
-package adb
-
-// Client wraps adb commands targeting a specific device/emulator.
-type Client struct {
-    Serial string // e.g. "emulator-5554"; empty = first device
-    ADBPath string // auto-detected from $ANDROID_HOME/platform-tools/adb or PATH
-}
-
-// New creates a Client, auto-detecting adb path.
-func New(serial string) (*Client, error)
-
-// Shell runs `adb shell <cmd>` and returns combined stdout+stderr.
-func (c *Client) Shell(cmd string) (string, error)
-
-// ShellOrFail is Shell but calls t.Fatal on error.
-func (c *Client) ShellOrFail(t testing.TB, cmd string) string
-
-// Install installs an APK (-r for reinstall).
-func (c *Client) Install(apkPath string) error
-
-// Push pushes a local file to the device.
-func (c *Client) Push(local, remote string) error
-
-// Pull pulls a device file to local.
-func (c *Client) Pull(remote, local string) error
-
-// Forward sets up a TCP port forward: `adb forward tcp:<local> localabstract:<remote>`.
-func (c *Client) Forward(localPort int, abstractSocket string) error
-
-// Screencap captures a PNG screenshot to a local file.
-func (c *Client) Screencap(localPath string) error
-
-// Devices returns all connected device serials.
-func Devices() ([]string, error)
-
-// WaitForDevice blocks until a device is connected (with timeout).
-func (c *Client) WaitForDevice(timeout time.Duration) error
-```
-
-**Key implementation notes:**
-- Use `exec.Command` with `adb -s <serial>` prefix when serial is set.
-- Trim `\r\n` from shell output (Android shells return `\r\n`).
-- `ADBPath` resolution order: `$ANDROID_HOME/platform-tools/adb` → `$ANDROID_SDK_ROOT/platform-tools/adb` → `adb` in PATH.
-
----
-
-### `emulator/` — Emulator lifecycle
-
-**File: `emulator.go`**
+### Configuration
 
 ```go
-package emulator
-
 type Config struct {
-    AVD       string        // AVD name (e.g. "Pixel_7")
-    Headless  bool          // -no-window
-    GPU       string        // "swiftshader_indirect" (safe), "host" (fast but crash-prone)
-    NoAudio   bool          // -no-audio
-    WipeData  bool          // -wipe-data (clean state)
-    NoSnapshot bool         // -no-snapshot
-    Timeout   time.Duration // boot timeout (default 120s)
+    AVD         string
+    Serial      string
+    APK         string
+    AppPackage  string
+    AppActivity string
+    Headless    bool
+    GPU         string
+    NoAudio     bool
+    WipeData    bool
+    BootTimeout time.Duration
+    AppTimeout  time.Duration
+    CDPPort     int
 }
-
-type Instance struct {
-    PID    int
-    Serial string // e.g. "emulator-5554"
-    ADB    *adb.Client
-}
-
-// Start boots an emulator with the given config. Blocks until boot_completed=1.
-func Start(cfg Config) (*Instance, error)
-
-// Kill stops the emulator (adb emu kill).
-func (i *Instance) Kill() error
-
-// IsRunning checks if the emulator process is still alive.
-func (i *Instance) IsRunning() bool
-
-// WaitForBoot polls sys.boot_completed with a 1s interval until timeout.
-func (i *Instance) WaitForBoot(timeout time.Duration) error
 ```
 
-**Key implementation notes:**
-- `Start` runs `emulator -avd <name> [flags] &` via `exec.Command`, captures PID.
-- Flags composed from Config: `-no-window`, `-gpu swiftshader_indirect`, `-no-audio`, `-no-boot-anim`, `-no-snapshot`.
-- Wait for boot by polling `adb shell getprop sys.boot_completed` every 1s.
-- Serial detection: after `adb wait-for-device`, run `adb devices` and pick the one that appeared.
-- `Kill` sends `adb emu kill` then waits for process exit (with 10s timeout before SIGKILL).
+Exactly one of `AVD` and `Serial` is required:
 
----
+- `AVD` starts a new emulator. The returned `Device` owns and stops it.
+- `Serial` attaches to an existing emulator or physical device. The returned
+  `Device` never stops that device, and `Device.Emulator` is `nil`.
 
-### `ui/` — Native UI interaction via uiautomator
+The library never implicitly chooses the first connected device. `Headless`,
+`GPU`, `NoAudio`, and `WipeData` apply only in AVD mode and are rejected in
+attached mode.
 
-**File: `parse.go`**
+Boolean fields retain normal Go zero-value semantics: `false` remains false.
+There are no hidden `true` defaults. The non-boolean zero-value defaults are:
 
-```go
-package ui
+| Field | Default |
+| --- | --- |
+| `GPU` | `swiftshader_indirect` in AVD mode |
+| `BootTimeout` | 120 seconds |
+| `AppTimeout` | 30 seconds |
+| `CDPPort` | 9222 |
 
-// Element represents a UI element from the hierarchy dump.
-type Element struct {
-    Text        string
-    ResourceID  string
-    ContentDesc string
-    Class       string
-    Package     string
-    Clickable   bool
-    Bounds      Rect // parsed from bounds="[x1,y1][x2,y2]"
-}
+`APK` must name a regular file. If `AppPackage` is empty, Setup runs
+`aapt dump badging` before acquiring a device. AAPT resolution is:
 
-type Rect struct {
-    X1, Y1, X2, Y2 int
-}
+1. the `AAPT` environment variable;
+2. `aapt` on `PATH`;
+3. the newest executable `aapt` under `ANDROID_HOME/build-tools` or
+   `ANDROID_SDK_ROOT/build-tools`.
 
-func (r Rect) CenterX() int { return (r.X1 + r.X2) / 2 }
-func (r Rect) CenterY() int { return (r.Y1 + r.Y2) / 2 }
+If `AppPackage` is supplied, `aapt` is not required. APK inspection also keeps
+the first `launchable-activity` when present.
 
-// ParseDump parses uiautomator XML dump into a flat slice of Elements.
-func ParseDump(xmlData []byte) ([]Element, error)
+`AppActivity` may be a short class, dot-prefixed class, fully qualified class,
+or a component whose package matches `AppPackage`. When it is empty, Setup
+uses APK metadata when available, then tries these device commands:
 
-// FindByText returns elements whose Text contains the substring (case-sensitive).
-func FindByText(elements []Element, text string) []Element
+```text
+cmd package resolve-activity --brief \
+    -a android.intent.action.MAIN \
+    -c android.intent.category.LAUNCHER <package>
 
-// FindByResourceID returns elements whose ResourceID matches exactly.
-func FindByResourceID(elements []Element, id string) []Element
-
-// FindByTextRegex returns elements whose Text matches the regex.
-func FindByTextRegex(elements []Element, pattern string) []Element
+pm resolve-activity --brief \
+    -a android.intent.action.MAIN \
+    -c android.intent.category.LAUNCHER <package>
 ```
 
-**File: `ui.go`**
+### Device API
 
 ```go
-package ui
-
-// Interactor provides native UI interactions via uiautomator + adb input.
-type Interactor struct {
-    ADB     *adb.Client
-    Timeout time.Duration // default wait timeout (10s)
-}
-
-// TapOnText finds an element by text and taps its center. Polls with retry.
-func (u *Interactor) TapOnText(t testing.TB, text string, timeout ...time.Duration)
-
-// LongPressOnText finds an element by text and long-presses (swipe-in-place 1.5s).
-func (u *Interactor) LongPressOnText(t testing.TB, text string, timeout ...time.Duration)
-
-// TapOnID finds an element by resource-id and taps its center.
-func (u *Interactor) TapOnID(t testing.TB, resourceID string, timeout ...time.Duration)
-
-// WaitForText polls until an element with the given text appears.
-func (u *Interactor) WaitForText(t testing.TB, text string, timeout ...time.Duration)
-
-// AssertVisible asserts that text is currently visible in the UI hierarchy.
-func (u *Interactor) AssertVisible(t testing.TB, text string)
-
-// AssertGone asserts that text is NOT visible in the UI hierarchy.
-func (u *Interactor) AssertGone(t testing.TB, text string)
-
-// Dump returns the current UI hierarchy as parsed Elements.
-func (u *Interactor) Dump() ([]Element, error)
-
-// Tap sends an input tap at absolute coordinates (escape hatch).
-func (u *Interactor) Tap(x, y int)
-
-// TypeText types text via `adb shell input text`.
-func (u *Interactor) TypeText(text string)
-```
-
-**Key implementation notes:**
-- `uiautomator dump /dev/tty` outputs XML to stdout (avoids file I/O on device).
-- If that fails (some API levels), fall back to `uiautomator dump /sdcard/ui.xml` + `adb pull`.
-- Polling interval: 500ms. Default timeout: 10s (overridable per call).
-- Parse bounds with regex: `bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"`.
-- For `TapOnText`, if multiple elements match, tap the first clickable one; if none clickable, tap the first one's parent (walk up).
-- `t.Fatalf` on timeout with a descriptive message including the text sought and what WAS visible.
-
----
-
-### `cdp/` — Chrome DevTools Protocol client
-
-**File: `ws.go`**
-
-```go
-package cdp
-
-// Conn manages a WebSocket connection to a WebView's DevTools endpoint.
-type Conn struct {
-    url    string
-    ws     *websocket.Conn // use nhooyr.io/websocket or gorilla/websocket
-    nextID int64
-    mu     sync.Mutex
-    pending map[int64]chan json.RawMessage
-}
-
-// Connect establishes a CDP connection. Discovers the WebSocket URL via
-// http://localhost:<port>/json/list (first target).
-func Connect(localPort int) (*Conn, error)
-
-// ConnectWithRetry retries connection until success or timeout (handles app startup race).
-func ConnectWithRetry(localPort int, timeout time.Duration) (*Conn, error)
-
-// Send sends a CDP command and waits for its response.
-func (c *Conn) Send(method string, params map[string]any) (json.RawMessage, error)
-
-// Close closes the WebSocket.
-func (c *Conn) Close() error
-
-// Reconnect drops the current connection and re-establishes (after app restart).
-func (c *Conn) Reconnect() error
-```
-
-**File: `cdp.go`**
-
-```go
-package cdp
-
-// Client provides high-level WebView interactions over CDP.
-type Client struct {
-    Conn      *Conn
-    ADB       *adb.Client
-    LocalPort int // TCP port forwarded to the WebView debug socket
-    PID       int // app PID (for the socket name)
-}
-
-// NewClient creates a CDP client, sets up port forwarding, and connects.
-func NewClient(adbClient *adb.Client, appPackage string) (*Client, error)
-
-// Eval evaluates a JS expression and returns the string result.
-func (c *Client) Eval(t testing.TB, expression string) string
-
-// EvalAsync evaluates a JS expression that returns a Promise, awaiting it.
-func (c *Client) EvalAsync(t testing.TB, expression string) string
-
-// Click dispatches a mousePressed+mouseReleased at the center of a CSS-selected element.
-// This counts as a user gesture (unlike element.click() which doesn't for file inputs).
-func (c *Client) Click(t testing.TB, cssSelector string)
-
-// WaitForSelector polls until a CSS selector matches a visible element.
-func (c *Client) WaitForSelector(t testing.TB, cssSelector string, timeout time.Duration)
-
-// WaitForText polls until an element's textContent contains the substring.
-func (c *Client) WaitForText(t testing.TB, cssSelector string, text string, timeout time.Duration) string
-
-// Reconnect re-discovers the app PID, re-forwards the port, and reconnects WebSocket.
-func (c *Client) Reconnect(t testing.TB)
-```
-
-**Key implementation notes:**
-- Port forward: `adb forward tcp:<port> localabstract:webview_devtools_remote_<PID>`.
-- PID discovery: `adb shell pidof <package>`.
-- WebSocket URL discovery: `GET http://localhost:<port>/json/list` → first entry's `webSocketDebuggerUrl`.
-- `Click` implementation: get bounding rect via `Runtime.evaluate` + `getBoundingClientRect()`, then `Input.dispatchMouseEvent` (mousePressed + mouseReleased). This is a real user gesture (unlike `element.click()`).
-- `Eval` uses `Runtime.evaluate` with `returnByValue: true`. Check for `exceptionDetails` in response → `t.Fatalf`.
-- `EvalAsync` uses `Runtime.evaluate` with `awaitPromise: true, returnByValue: true`.
-- Message routing: each `Send` gets a unique incrementing ID. A background goroutine reads the WebSocket and dispatches responses to the correct pending channel by ID.
-- Use `nhooyr.io/websocket` (pure Go, maintained) — not gorilla (archived).
-- Reconnect: close old WS, re-discover PID (may have changed), re-forward, re-connect.
-
----
-
-### `permissions/` — Android permission dialog helper
-
-**File: `permissions.go`**
-
-```go
-package permissions
-
-// Handler knows how to interact with Android runtime permission dialogs.
-type Handler struct {
-    UI *ui.Interactor
-}
-
-// Grant taps the "allow" option on the current permission dialog.
-// Handles API-level differences in button wording:
-//   API 30+: "While using the app" / "Only this time" / "Don't allow"
-//   API 23-29: "Allow" / "Deny"
-func (h *Handler) Grant(t testing.TB, timeout ...time.Duration)
-
-// GrantAll repeatedly grants permission dialogs until none appear (for multi-permission requests).
-func (h *Handler) GrantAll(t testing.TB, timeout ...time.Duration)
-
-// Deny taps "Don't allow" / "Deny".
-func (h *Handler) Deny(t testing.TB, timeout ...time.Duration)
-```
-
-**Key implementation notes:**
-- `Grant` tries `TapOnText("While using the app")` first (API 30+), falls back to `TapOnText("Allow")` (API 23-29).
-- `GrantAll` loops: grant, sleep 1s, check if another dialog appeared, grant again, until no permission dialog text is visible (max 5 iterations to prevent infinite loops).
-- Detection of "is a permission dialog showing?" — check for text containing "Allow" AND package `com.google.android.permissioncontroller` or `com.android.permissioncontroller`.
-
----
-
-### `testkit.go` — Top-level API
-
-**File: `testkit.go`**
-
-```go
-package testkit
-
-// Config for setting up a test device.
-type Config struct {
-    AVD         string        // AVD name
-    APK         string        // path to APK to install
-    AppPackage  string        // e.g. "com.wails.app" (auto-detected from APK if empty)
-    Headless    bool          // no-window (default true)
-    GPU         string        // default "swiftshader_indirect"
-    NoAudio     bool          // default true
-    WipeData    bool          // default false
-    BootTimeout time.Duration // default 120s
-    AppTimeout  time.Duration // time to wait for app to start after launch (default 30s)
-    CDPPort     int           // local port for CDP forwarding (default 9222)
-}
-
-// Device is the main handle for interacting with the test device.
 type Device struct {
     Emulator    *emulator.Instance
     ADB         *adb.Client
@@ -392,129 +152,330 @@ type Device struct {
     Config      Config
 }
 
-// Setup boots the emulator, installs the APK, launches the app, and connects CDP.
-// Call this from TestMain.
 func Setup(cfg Config) *Device
-
-// Teardown kills the emulator and cleans up.
-func (d *Device) Teardown()
-
-// RestartApp force-stops and relaunches the app, reconnecting CDP.
-// Call this at the start of each test for clean state.
-func (d *Device) RestartApp(t testing.TB)
-
-// LaunchApp starts the app without force-stopping first.
+func (d *Device) Teardown() error
+func (d *Device) ForceStop() error
 func (d *Device) LaunchApp(t testing.TB)
-
-// ForceStop stops the app process.
-func (d *Device) ForceStop()
+func (d *Device) RestartApp(t testing.TB)
 ```
 
-**Key implementation notes:**
-- `Setup` sequence: `emulator.Start` → `WaitForBoot` → `adb.Install` → launch app → sleep `AppTimeout` → `cdp.NewClient`.
-- `RestartApp`: `ForceStop` → sleep 1s → `am start` → sleep `AppTimeout` → `CDP.Reconnect`.
-- Package auto-detection from APK: `aapt dump badging <apk> | grep package:`.
-- If `aapt` not available, require `AppPackage` in config.
-- `Setup` panics on failure (not `t.Fatal`) because it's called from `TestMain` which doesn't have a `*testing.T`.
+`Config` on the returned device contains normalized defaults and the resolved
+package/activity.
 
----
+`Setup` is a `TestMain` convenience and panics on failure. It performs these
+operations:
 
-## Dependencies
+1. Normalize and validate configuration and the APK.
+2. Inspect the APK when package auto-detection is needed.
+3. Start an owned AVD, or attach to `Serial` and wait for device/boot readiness.
+4. Construct native UI and permission helpers.
+5. Install the APK with `adb install -r`.
+6. Resolve the launcher activity and run `am start -W -n <component>`.
+7. Poll app PID, WebView socket forwarding, target discovery, and WebSocket
+   connection until CDP is ready.
 
+Setup uses bounded contexts and no fixed app-start sleeps. Launch and initial
+CDP readiness share one `AppTimeout` context. If any step fails, resources
+already acquired are cleaned before Setup panics.
+
+`LaunchApp` launches the resolved component but does not reconnect CDP.
+`RestartApp` force-stops, launches, and reconnects CDP within `AppTimeout`.
+Force-stopping does not clear application data.
+
+`Teardown` is nil-safe and idempotent. It closes CDP/removes its ADB forward,
+force-stops an app launched by the device, and kills an owned emulator. It
+continues after individual cleanup failures and returns their joined error. An
+attached emulator/device remains running.
+
+## `adb` package
+
+```go
+type Client struct {
+    Serial  string
+    ADBPath string
+}
+
+func New(serial string) (*Client, error)
+
+func (c *Client) Run(args ...string) (string, error)
+func (c *Client) RunContext(ctx context.Context, args ...string) (string, error)
+func (c *Client) Shell(command string) (string, error)
+func (c *Client) ShellContext(ctx context.Context, command string) (string, error)
+func (c *Client) ShellOrFail(t testing.TB, command string) string
+func (c *Client) Install(apkPath string) error
+func (c *Client) Push(local, remote string) error
+func (c *Client) Pull(remote, local string) error
+func (c *Client) Forward(localPort int, abstractSocket string) error
+func (c *Client) RemoveForward(localPort int) error
+func (c *Client) Screencap(localPath string) error
+func (c *Client) WaitForDevice(timeout time.Duration) error
+func (c *Client) WaitForDeviceContext(ctx context.Context) error
+
+func Devices() ([]string, error)
+func DevicesContext(ctx context.Context) ([]string, error)
 ```
-require (
-    nhooyr.io/websocket v1.8.x    // WebSocket client for CDP
-    github.com/stretchr/testify v1.9.x  // assertions (optional — consumers bring their own)
-)
+
+`Run` executes host-side ADB subcommands. `Shell` supplies one command string to
+`adb shell`. Both return trimmed combined output. Context variants terminate
+and reap the ADB child process on cancellation. `-s <Serial>` is inserted
+before the host command when a serial is configured.
+
+ADB executable resolution is:
+
+1. `$ANDROID_HOME/platform-tools/adb`;
+2. `$ANDROID_SDK_ROOT/platform-tools/adb`;
+3. `adb` on `PATH`.
+
+`Devices` returns only entries whose state is exactly `device`; offline and
+unauthorized entries are omitted.
+
+## `emulator` package
+
+```go
+type Config struct {
+    AVD        string
+    Headless   bool
+    GPU        string
+    NoAudio    bool
+    WipeData   bool
+    NoSnapshot bool
+    Timeout    time.Duration
+}
+
+type Instance struct {
+    PID    int
+    Serial string
+    ADB    *adb.Client
+}
+
+func Start(cfg Config) (*Instance, error)
+func (i *Instance) WaitForBoot(timeout time.Duration) error
+func (i *Instance) Kill() error
+func (i *Instance) IsRunning() bool
 ```
 
-Minimal — only the WebSocket library is essential. testify is optional (used in examples/tests).
+`AVD` is required. A zero timeout becomes 120 seconds; a negative timeout is
+rejected. Boolean fields remain false unless explicitly enabled.
 
-## Testing the library itself
+Start first obtains a checked baseline from `adb devices`, launches the
+emulator, and detects the new serial by comparing device lists. Serial
+detection and `sys.boot_completed` polling share one overall timeout. The
+child process is monitored concurrently so an early exit interrupts a blocked
+ADB operation and is reported directly. Every post-start failure kills and
+reaps the child.
 
-The library's own tests need a running emulator. Use build tags:
+`Kill` is nil-safe and idempotent. It runs the host-side command
+`adb -s <serial> emu kill`, waits up to ten seconds for graceful exit, then
+falls back to killing and reaping the process.
+
+## `ui` package
+
+```go
+type Element struct {
+    Text        string
+    ResourceID  string
+    ContentDesc string
+    Class       string
+    Package     string
+    Clickable   bool
+    Bounds      Rect
+}
+
+type Rect struct {
+    X1, Y1, X2, Y2 int
+}
+
+func (r Rect) CenterX() int
+func (r Rect) CenterY() int
+func ParseDump(xmlData []byte) ([]Element, error)
+func FindByText(elements []Element, text string) []Element
+func FindByResourceID(elements []Element, id string) []Element
+func FindByTextRegex(elements []Element, pattern string) ([]Element, error)
+
+type Interactor struct {
+    ADB     *adb.Client
+    Timeout time.Duration
+}
+
+func NewInteractor(adbClient *adb.Client) *Interactor
+func (u *Interactor) TapOnText(t testing.TB, text string, timeout ...time.Duration)
+func (u *Interactor) LongPressOnText(t testing.TB, text string, timeout ...time.Duration)
+func (u *Interactor) TapOnID(t testing.TB, resourceID string, timeout ...time.Duration)
+func (u *Interactor) WaitForText(t testing.TB, text string, timeout ...time.Duration)
+func (u *Interactor) AssertVisible(t testing.TB, text string)
+func (u *Interactor) AssertGone(t testing.TB, text string)
+func (u *Interactor) Dump() ([]Element, error)
+func (u *Interactor) Tap(x, y int) error
+func (u *Interactor) TypeText(text string) error
+```
+
+`ParseDump` flattens the uiautomator XML tree and validates every bounds value.
+Text searches are case-sensitive substring searches; resource IDs are exact;
+invalid regular expressions return an error.
+
+`Dump` first runs `uiautomator dump /dev/tty` and extracts only the hierarchy
+XML. If that fails or is malformed, it dumps to `/sdcard/ui.xml`, pulls the
+file into a host temporary directory, parses it, and removes both temporary
+files.
+
+Wait/tap helpers poll every 500 ms. An optional positive timeout overrides the
+interactor default of ten seconds. Text taps prefer a clickable match and
+otherwise use the first match. Native input errors fail the supplied test.
+`TypeText` quotes spaces and shell metacharacters as one Android-shell word.
+Polling also detects and dismisses the known System UI ANR dialog by tapping
+`Wait`.
+
+## `permissions` package
+
+```go
+type Handler struct {
+    UI *ui.Interactor
+}
+
+func NewHandler(interactor *ui.Interactor) *Handler
+func (h *Handler) Grant(t testing.TB, timeout ...time.Duration)
+func (h *Handler) Deny(t testing.TB, timeout ...time.Duration)
+func (h *Handler) GrantAll(t testing.TB, timeout ...time.Duration)
+func (h *Handler) IsVisible() bool
+```
+
+The handler recognizes only buttons owned by known Android permission
+controller/package-installer packages, preventing application text such as
+`Allow` from being tapped accidentally. It prefers resource IDs, then exact
+English button text, in this grant order:
+
+1. `While using the app`;
+2. `Only this time`;
+3. `Allow`/`ALLOW`.
+
+Deny recognizes `Don't allow` (including the typographic apostrophe),
+`Deny`/`DENY`, and the controller resource ID for deny-and-don't-ask-again.
+
+Dump and tap errors are retried until the timeout. `GrantAll` waits for the
+first dialog to appear, drains up to five sequential dialogs, and fails if a
+sixth remains. Its transition delay is one second. `IsVisible` returns false
+when the hierarchy cannot be inspected.
+
+## `cdp` package
+
+### Transport
+
+```go
+func Connect(localPort int) (*Conn, error)
+func ConnectContext(ctx context.Context, localPort int) (*Conn, error)
+func ConnectWithRetry(localPort int, timeout time.Duration) (*Conn, error)
+func ConnectWithRetryContext(ctx context.Context, localPort int) (*Conn, error)
+func ConnectDirect(webSocketURL string) (*Conn, error)
+func ConnectDirectContext(ctx context.Context, webSocketURL string) (*Conn, error)
+
+func (c *Conn) Send(method string, params map[string]any) (json.RawMessage, error)
+func (c *Conn) SendWithTimeout(method string, params map[string]any, timeout time.Duration) (json.RawMessage, error)
+func (c *Conn) SendContext(ctx context.Context, method string, params map[string]any) (json.RawMessage, error)
+func (c *Conn) Close() error
+```
+
+Connection discovery requests `http://localhost:<port>/json/list`, preferring
+the first `page` target and otherwise the first target with a WebSocket URL.
+The HTTP response must be successful and is limited to 4 MiB.
+
+Every CDP command receives a positive atomic ID. A background reader routes
+responses to pending commands. Protocol errors, malformed messages, write
+failures, connection loss, and explicit closure are propagated to all affected
+waiters. `Close` is safe to call concurrently and repeatedly.
+
+### High-level WebView client
+
+```go
+type Client struct {
+    Conn       *Conn
+    ADB        *adb.Client
+    LocalPort  int
+    AppPackage string
+}
+
+func NewClient(adbClient *adb.Client, appPackage string, localPort int) (*Client, error)
+func NewClientContext(ctx context.Context, adbClient *adb.Client, appPackage string, localPort int) (*Client, error)
+func (c *Client) Eval(t testing.TB, expression string) string
+func (c *Client) EvalE(expression string) (string, error)
+func (c *Client) EvalAsync(t testing.TB, expression string) string
+func (c *Client) Click(t testing.TB, cssSelector string)
+func (c *Client) WaitForSelector(t testing.TB, cssSelector string, timeout time.Duration)
+func (c *Client) WaitForText(t testing.TB, cssSelector, text string, timeout time.Duration) string
+func (c *Client) Reconnect(t testing.TB)
+func (c *Client) ReconnectContext(ctx context.Context) error
+func (c *Client) Close() error
+func (c *Client) CloseContext(ctx context.Context) error
+```
+
+Client creation and reconnection poll for the app PID, forward
+`tcp:<port>` to `localabstract:webview_devtools_remote_<PID>`, discover a
+target, and dial it under one context. Failed connection attempts remove any
+forward they created. Reconnection immediately closes the old connection and
+removes the old forward before discovering the new PID.
+
+`Eval` uses `Runtime.evaluate` with `returnByValue`; `EvalAsync` additionally
+sets `awaitPromise`. JavaScript exceptions are returned or fail the supplied
+test. Non-string values are returned as their JSON representation.
+
+`WaitForSelector` requires an element with non-zero bounds whose ancestor
+styles do not hide it. `WaitForText` returns the last matching text content.
+`Click` evaluates the element bounds and sends `mousePressed` plus
+`mouseReleased` through `Input.dispatchMouseEvent`. This provides a real user
+gesture; JavaScript `element.click()` is not a substitute for permission- or
+file-input flows.
+
+The non-context constructors use bounded defaults: ten seconds for a raw
+connection, 30 seconds for client readiness/reconnection, and two seconds for
+client cleanup.
+
+## Testing and integration
+
+The library's unit suite uses deterministic fakes and local HTTP/WebSocket
+servers. It requires no Android SDK or running emulator:
+
+```sh
+go test ./...
+```
+
+Consumer tests requiring Android should use:
 
 ```go
 //go:build android_integration
-
-package ui_test
 ```
 
-Run with: `go test -tags android_integration ./...` (skipped in normal `go test`).
-
-The library tests use a tiny test APK (a single-activity app with known text elements) bundled in `testdata/`.
-
-## CI Integration (for consumers)
-
-```yaml
-# .github/workflows/android-test.yml
-jobs:
-  android-integration:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with: { go-version: '1.25' }
-      - uses: reactivecircus/android-emulator-runner@v2
-        with:
-          api-level: 35
-          arch: x86_64
-          emulator-options: -no-window -gpu swiftshader_indirect -no-audio -no-boot-anim
-          script: |
-            # Build and install your app first
-            task android:build && task android:assemble:apk
-            adb install bin/myapp.apk
-            # Run integration tests
-            go test -tags android_integration -timeout 5m ./tests/android/
+```sh
+go test -tags android_integration -timeout 5m ./...
 ```
 
-## Performance Characteristics
+When an external runner already owns an emulator, configure root Setup with
+its explicit `Serial`; do not also configure `AVD`. Setup installs the APK, so
+the runner script only needs to build it and expose its path and device serial.
+See the attached-emulator workflow in the README.
 
-| Operation | Time |
-|-----------|------|
-| Emulator boot (cold, swiftshader) | ~20s |
-| APK install | ~3s |
-| First app launch (Go runtime init) | ~10-30s (first time after wipe is slow) |
-| App restart (force-stop + relaunch) | ~5s |
-| `uiautomator dump` | ~500ms |
-| CDP `Evaluate` | ~50ms |
-| CDP `DispatchMouseEvent` | ~100ms |
-| **Per-test overhead (RestartApp + interactions)** | **~8-15s** |
-| **10 tests total** | **~3 minutes** (including one-time setup) |
+The minimum Go version is 1.23. The module declares that baseline, and the
+required CI test job runs against the Go 1.23 release line.
 
-## Known Gotchas to Handle
+## Dependencies
 
-1. **Go embed cache**: When testing template changes, `go build` may cache old embedded frontend assets. The consumer must `go clean -cache` or delete the `.so` before rebuild.
+The only runtime dependency is `nhooyr.io/websocket`. Consumers choose their
+own assertion library; `testify` is not a module dependency.
 
-2. **First launch after wipe**: The Go runtime's first cold start on a wiped AVD can take 30s+ or even OOM on swiftshader. The library's `AppTimeout` config handles this. Second+ launches are fast.
+## Operational notes
 
-3. **SystemUI ANR**: Software-GPU emulators occasionally trigger "System UI isn't responding". The library should auto-dismiss this (tap "Wait") if detected during `WaitForText`/`TapOnText`.
+- Android shell output is trimmed, including CRLF output.
+- A wiped AVD and a cold WebView may take significantly longer to initialize;
+  configure timeouts rather than adding sleeps.
+- `NoAudio: true` improves emulator stability but prevents successful audio
+  capture even when the Android permission is granted.
+- CDP clicks use CSS pixels; no device-pixel-ratio multiplication is needed.
+- Permission labels are currently matched in English. Use a controlled emulator
+  locale for these helpers.
 
-4. **CDP connection race**: The WebView's debug socket becomes available slightly after the activity starts. `ConnectWithRetry` handles this.
+## Non-goals for v1
 
-5. **Permission dialog text varies by API level**: API 30+ uses "While using the app" / "Only this time" / "Don't allow". API 23-29 uses "Allow" / "Deny". The `permissions` package handles both.
-
-6. **`element.click()` doesn't count as a user gesture** in Android WebView for file inputs and permission-requiring APIs. Must use `Input.dispatchMouseEvent` via CDP instead.
-
-7. **`-no-audio` emulator flag**: Without it, emulator may crash or lag. With it, `getUserMedia({audio:true})` will get permission granted but the stream will fail with `NotReadableError`. Tests for audio should skip the stream assertion and just verify the permission was granted.
-
-8. **Multiple emulators**: If the host has multiple devices connected, serial disambiguation is critical. The library uses the serial returned by the emulator it booted.
-
-## Suggested Implementation Order
-
-1. `adb/` — foundation, everything else depends on it
-2. `emulator/` — needs adb, enables manual testing of remaining packages
-3. `ui/` (parse.go first, then ui.go) — needs adb
-4. `cdp/` (ws.go first, then cdp.go) — needs adb for port forwarding
-5. `permissions/` — composed from ui, trivial once ui works
-6. `testkit.go` — composed from all above, straightforward
-7. `examples/` — a real Wails app test demonstrating the full flow
-
-## Non-Goals (explicitly out of scope)
-
-- iOS/Simulator support (different toolchain entirely — future separate library)
-- Visual regression testing (screenshot comparison)
+- iOS or Simulator support
+- Visual regression testing
 - Performance benchmarking
-- Network mocking/interception
-- Multiple simultaneous emulators (v1 supports one device per test suite)
-- Flaky-test retry logic (consumers handle this at the runner level)
+- Network mocking or interception
+- Multiple simultaneous devices per `Device`
+- Automatic flaky-test retries
