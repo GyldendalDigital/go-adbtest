@@ -1,0 +1,58 @@
+# Consumer template: copy this file to .github/workflows/android-integration.yml
+# and replace the fixture-specific placeholders below.
+name: Android WebView integration
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  android-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      ADBTEST_APK: ${{ github.workspace }}/app/build/outputs/apk/debug/app-debug.apk
+      ADBTEST_APP_PACKAGE: com.example.app
+      ADBTEST_APP_ACTIVITY: .MainActivity
+      ADBTEST_PERMISSION_TRIGGER_SELECTOR: "#request-permission"
+      ADBTEST_RESULT_SELECTOR: "#permission-status"
+      ADBTEST_EXPECTED_TEXT: granted
+      ADBTEST_INTERACTION_TIMEOUT: 20s
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build APK
+        run: |
+          # Replace this command and ADBTEST_APK with the consumer app's build.
+          ./gradlew assembleDebug
+          test -f "$ADBTEST_APK"
+
+      - name: Run Android integration suite
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          arch: x86_64
+          emulator-options: >-
+            -no-window
+            -gpu swiftshader_indirect
+            -no-audio
+            -no-boot-anim
+          script: |
+            serial="$(adb devices | awk 'NR > 1 && $2 == "device" { print $1; exit }')"
+            test -n "$serial"
+            ADBTEST_SERIAL="$serial" go test \
+              -tags=android_integration \
+              -count=1 \
+              -timeout=10m \
+              ./integration/...
