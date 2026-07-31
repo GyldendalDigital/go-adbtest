@@ -52,7 +52,8 @@ Optional settings are:
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `ADBTEST_APP_PACKAGE` | Read from the APK | Android application package. Setting it explicitly is recommended in CI. |
-| `ADBTEST_APP_ACTIVITY` | Resolved from the APK | Launch activity. Setting it explicitly is recommended in CI. |
+| `ADBTEST_APP_PROCESS` | Application package | Process hosting the WebView. Use a relative name such as `:webview` for a secondary process. |
+| `ADBTEST_APP_ACTIVITY` | APK metadata or device resolution | Launch activity. Setting it explicitly is recommended in CI and on older Android releases. |
 | `ADBTEST_INTERACTION_TIMEOUT` | `15s` | Timeout for selector, text, and permission interaction. |
 | `ADBTEST_BOOT_TIMEOUT` | Library default | Emulator/device boot timeout. |
 | `ADBTEST_APP_TIMEOUT` | Library default | Application/CDP startup timeout. |
@@ -65,6 +66,8 @@ Optional settings are:
 The trigger fixture must actually cause the application to request a runtime
 permission. `GrantAll` safely returns when no permission dialog appears, but in
 that case the example is no longer exercising the intended permission flow.
+For Android's limited photo/video choice, call `GrantSelected` and complete the
+system picker instead of using this example's full-access `GrantAll` flow.
 
 ## Device modes
 
@@ -93,6 +96,10 @@ go test -tags=android_integration -count=1 -timeout=10m ./integration/...
 ```
 
 The CI template uses serial mode because the emulator action owns the emulator.
+Setup installs with `adb install -r`, which retains existing application data
+and permission state. Reset that state explicitly when test isolation requires
+it. The configured CDP port must also be free; go-adbtest will not replace a
+pre-existing ADB forward.
 
 To compile and exercise the example's configuration checks without Android SDK
 tools, leave the fixture environment unset:

@@ -84,6 +84,7 @@ type Config struct {
     Serial      string
     APK         string
     AppPackage  string
+    AppProcess  string
     AppActivity string
     Headless    bool
     GPU         string
@@ -110,7 +111,7 @@ There are no hidden `true` defaults. The non-boolean zero-value defaults are:
 
 | Field | Default |
 | --- | --- |
-| `GPU` | `swiftshader_indirect` in AVD mode |
+| `GPU` | `auto` in AVD mode |
 | `BootTimeout` | 120 seconds |
 | `AppTimeout` | 30 seconds |
 | `CDPPort` | 9222 |
@@ -126,6 +127,10 @@ There are no hidden `true` defaults. The non-boolean zero-value defaults are:
 If `AppPackage` is supplied, `aapt` is not required. APK inspection also keeps
 the first `launchable-activity` when present.
 
+`AppProcess` identifies the Android process that hosts the debuggable WebView.
+It defaults to `AppPackage`. A colon-prefixed value such as `:webview` is
+expanded relative to the package; a fully qualified process name is retained.
+
 `AppActivity` may be a short class, dot-prefixed class, fully qualified class,
 or a component whose package matches `AppPackage`. When it is empty, Setup
 uses APK metadata when available, then tries these device commands:
@@ -139,6 +144,9 @@ pm resolve-activity --brief \
     -a android.intent.action.MAIN \
     -c android.intent.category.LAUNCHER <package>
 ```
+
+Set `AppActivity` explicitly for the most predictable behavior on older Android
+releases, whose package-manager command output is less consistent.
 
 ### Device API
 
@@ -169,14 +177,20 @@ operations:
 2. Inspect the APK when package auto-detection is needed.
 3. Start an owned AVD, or attach to `Serial` and wait for device/boot readiness.
 4. Construct native UI and permission helpers.
-5. Install the APK with `adb install -r`.
+5. Install the APK with `adb install -r`, retaining existing application data
+   and granted permissions.
 6. Resolve the launcher activity and run `am start -W -n <component>`.
-7. Poll app PID, WebView socket forwarding, target discovery, and WebSocket
-   connection until CDP is ready.
+7. Poll every PID for `AppProcess`, match it to the actual abstract WebView
+   socket in `/proc/net/unix`, create an exclusive forward, discover a target,
+   and connect its WebSocket until CDP is ready.
 
 Setup uses bounded contexts and no fixed app-start sleeps. Launch and initial
 CDP readiness share one `AppTimeout` context. If any step fails, resources
 already acquired are cleaned before Setup panics.
+
+Forwarding uses `adb forward --no-rebind`; an existing mapping for `CDPPort`
+causes setup to fail rather than being replaced. Cleanup removes a forward only
+after this client successfully created and recorded it.
 
 `LaunchApp` launches the resolved component but does not reconnect CDP.
 `RestartApp` force-stops, launches, and reconnects CDP within `AppTimeout`.
@@ -226,8 +240,9 @@ ADB executable resolution is:
 2. `$ANDROID_SDK_ROOT/platform-tools/adb`;
 3. `adb` on `PATH`.
 
-`Devices` returns only entries whose state is exactly `device`; offline and
-unauthorized entries are omitted.
+`Devices` returns every serial listed by adb, including offline and unauthorized
+entries. This lets emulator startup retain a complete pre-launch baseline while
+the device state changes.
 
 ## `emulator` package
 
@@ -266,7 +281,7 @@ reaps the child.
 
 `Kill` is nil-safe and idempotent. It runs the host-side command
 `adb -s <serial> emu kill`, waits up to ten seconds for graceful exit, then
-falls back to killing and reaping the process.
+falls back to killing the launcher's process group and reaping the process.
 
 ## `ui` package
 
@@ -305,8 +320,11 @@ func (u *Interactor) WaitForText(t testing.TB, text string, timeout ...time.Dura
 func (u *Interactor) AssertVisible(t testing.TB, text string)
 func (u *Interactor) AssertGone(t testing.TB, text string)
 func (u *Interactor) Dump() ([]Element, error)
+func (u *Interactor) DumpContext(ctx context.Context) ([]Element, error)
 func (u *Interactor) Tap(x, y int) error
+func (u *Interactor) TapContext(ctx context.Context, x, y int) error
 func (u *Interactor) TypeText(text string) error
+func (u *Interactor) TypeTextContext(ctx context.Context, text string) error
 ```
 
 `ParseDump` flattens the uiautomator XML tree and validates every bounds value.
@@ -314,16 +332,19 @@ Text searches are case-sensitive substring searches; resource IDs are exact;
 invalid regular expressions return an error.
 
 `Dump` first runs `uiautomator dump /dev/tty` and extracts only the hierarchy
-XML. If that fails or is malformed, it dumps to `/sdcard/ui.xml`, pulls the
-file into a host temporary directory, parses it, and removes both temporary
-files.
+XML. If that fails or is malformed, it dumps to a unique file under
+`/data/local/tmp`, pulls the file into a private host temporary directory,
+parses it, and removes both temporary files. The unique path prevents stale or
+concurrent dumps from being mistaken for the current hierarchy.
 
 Wait/tap helpers poll every 500 ms. An optional positive timeout overrides the
-interactor default of ten seconds. Text taps prefer a clickable match and
-otherwise use the first match. Native input errors fail the supplied test.
-`TypeText` quotes spaces and shell metacharacters as one Android-shell word.
-Polling also detects and dismisses the known System UI ANR dialog by tapping
-`Wait`.
+interactor default of ten seconds. Each helper applies one deadline to hierarchy
+dumps, polling, and input. `Dump`, `Tap`, and `TypeText` also have finite
+defaults; their context variants let lower-level callers supply a shared
+deadline. Text taps prefer a clickable match and otherwise use the first match.
+Native input errors fail the supplied test. `TypeText` quotes spaces and shell
+metacharacters as one Android-shell word. Polling also detects and dismisses the
+known System UI ANR dialog by tapping `Wait`.
 
 ## `permissions` package
 
@@ -334,6 +355,7 @@ type Handler struct {
 
 func NewHandler(interactor *ui.Interactor) *Handler
 func (h *Handler) Grant(t testing.TB, timeout ...time.Duration)
+func (h *Handler) GrantSelected(t testing.TB, timeout ...time.Duration)
 func (h *Handler) Deny(t testing.TB, timeout ...time.Duration)
 func (h *Handler) GrantAll(t testing.TB, timeout ...time.Duration)
 func (h *Handler) IsVisible() bool
@@ -344,17 +366,26 @@ controller/package-installer packages, preventing application text such as
 `Allow` from being tapped accidentally. It prefers resource IDs, then exact
 English button text, in this grant order:
 
-1. `While using the app`;
-2. `Only this time`;
-3. `Allow`/`ALLOW`.
+1. Full media access (`permission_allow_all_button`);
+2. `While using the app`;
+3. `Only this time`;
+4. `Allow`/`ALLOW`.
+
+`GrantSelected` deliberately handles Android 14's limited photo/video option
+separately because it may open a system picker that the caller must complete.
+`Grant` never silently chooses partial media access when a full-access choice is
+available.
 
 Deny recognizes `Don't allow` (including the typographic apostrophe),
-`Deny`/`DENY`, and the controller resource ID for deny-and-don't-ask-again.
+`Deny`/`DENY`, and controller resource IDs for deny-and-don't-ask-again and
+Android 14's don't-allow-more-selected-media action.
 
 Dump and tap errors are retried until the timeout. `GrantAll` waits for the
 first dialog to appear, drains up to five sequential dialogs, and fails if a
-sixth remains. Its transition delay is one second. `IsVisible` returns false
-when the hierarchy cannot be inspected.
+sixth remains. It polls for each subsequent dialog for up to two seconds while
+remaining within one overall timeout. UI dumps and taps receive the remaining
+deadline, so a blocked ADB call cannot outlive the helper. `IsVisible` returns
+false when the hierarchy cannot be inspected.
 
 ## `cdp` package
 
@@ -377,6 +408,9 @@ func (c *Conn) Close() error
 Connection discovery requests `http://localhost:<port>/json/list`, preferring
 the first `page` target and otherwise the first target with a WebSocket URL.
 The HTTP response must be successful and is limited to 4 MiB.
+When a WebView exposes multiple page targets, callers needing a specific one
+must inspect the target list themselves and use `ConnectDirectContext`; the
+convenience discovery API intentionally uses the first page.
 
 Every CDP command receives a positive atomic ID. A background reader routes
 responses to pending commands. Protocol errors, malformed messages, write
@@ -391,12 +425,16 @@ type Client struct {
     ADB        *adb.Client
     LocalPort  int
     AppPackage string
+    AppProcess string
 }
 
 func NewClient(adbClient *adb.Client, appPackage string, localPort int) (*Client, error)
+func NewClientForProcess(adbClient *adb.Client, appPackage, appProcess string, localPort int) (*Client, error)
 func NewClientContext(ctx context.Context, adbClient *adb.Client, appPackage string, localPort int) (*Client, error)
+func NewClientForProcessContext(ctx context.Context, adbClient *adb.Client, appPackage, appProcess string, localPort int) (*Client, error)
 func (c *Client) Eval(t testing.TB, expression string) string
 func (c *Client) EvalE(expression string) (string, error)
+func (c *Client) EvalContext(ctx context.Context, expression string) (string, error)
 func (c *Client) EvalAsync(t testing.TB, expression string) string
 func (c *Client) Click(t testing.TB, cssSelector string)
 func (c *Client) WaitForSelector(t testing.TB, cssSelector string, timeout time.Duration)
@@ -407,15 +445,23 @@ func (c *Client) Close() error
 func (c *Client) CloseContext(ctx context.Context) error
 ```
 
-Client creation and reconnection poll for the app PID, forward
-`tcp:<port>` to `localabstract:webview_devtools_remote_<PID>`, discover a
-target, and dial it under one context. Failed connection attempts remove any
-forward they created. Reconnection immediately closes the old connection and
-removes the old forward before discovering the new PID.
+Client creation and reconnection collect every `pidof <AppProcess>` result,
+read `/proc/net/unix`, and require exactly one matching abstract socket. This
+supports socket names with implementation-defined infixes rather than assuming
+only `webview_devtools_remote_<PID>`. Multiple matches are reported as an
+ambiguity instead of selecting one silently.
+
+The client forwards `tcp:<port>` to that socket with `adb forward --no-rebind`,
+discovers a target, and dials it under one context. A client records ownership
+only after creating the forward successfully. Failed connection attempts,
+reconnection, and close remove only an owned mapping. Reconnection immediately
+closes the old connection and removes its owned forward before rediscovery.
 
 `Eval` uses `Runtime.evaluate` with `returnByValue`; `EvalAsync` additionally
 sets `awaitPromise`. JavaScript exceptions are returned or fail the supplied
-test. Non-string values are returned as their JSON representation.
+test. Non-string values are returned as their JSON representation, including
+`null`, `undefined`, and CDP's unserializable numeric values. `EvalContext`
+allows one caller deadline to cover evaluation.
 
 `WaitForSelector` requires an element with non-zero bounds whose ancestor
 styles do not hide it. `WaitForText` returns the last matching text content.
@@ -457,8 +503,8 @@ required CI test job runs against the Go 1.23 release line.
 
 ## Dependencies
 
-The only runtime dependency is `nhooyr.io/websocket`. Consumers choose their
-own assertion library; `testify` is not a module dependency.
+The only runtime dependency is `github.com/coder/websocket`. Consumers choose
+their own assertion library; `testify` is not a module dependency.
 
 ## Operational notes
 

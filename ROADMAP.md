@@ -1,8 +1,10 @@
 # go-adbtest Roadmap
 
-Checked items below are implemented in local commits; the complete local build
-still requires the final council audit. Detailed status and recovery notes live
-in [docs/work-breakdown.md](docs/work-breakdown.md) and
+Checked items below are implemented in local commits. The feature build,
+examples, documentation, council review, and local release validation are
+complete. Real Android execution remains an external follow-up because this
+host has no SDK, emulator, or application fixture. Detailed status lives in
+[docs/work-breakdown.md](docs/work-breakdown.md) and
 [docs/session.md](docs/session.md).
 
 ## Phase 1: Foundation — `adb/` package
@@ -11,7 +13,7 @@ in [docs/work-breakdown.md](docs/work-breakdown.md) and
 - [x] `adb.Client` struct with serial and path auto-detection
 - [x] `Shell`, `Install`, `Push`, `Pull`, `Forward` methods
 - [x] `Devices()`, `WaitForDevice()`, `Screencap()`
-- [x] `testing.TB` helper variants (`ShellOrFail`, etc.)
+- [x] `testing.TB` helper (`ShellOrFail`)
 - [x] Unit tests
 
 ## Phase 2: Emulator Lifecycle — `emulator/` package
@@ -28,7 +30,7 @@ in [docs/work-breakdown.md](docs/work-breakdown.md) and
 
 - [x] `parse.go` — XML parsing, element search by text/ID/regex
 - [x] `ui.go` — `TapOnText`, `WaitForText`, `AssertVisible`, `AssertGone`
-- [x] Fallback: `/dev/tty` → `/sdcard/ui.xml` dump strategy
+- [x] Fallback: `/dev/tty` → unique device-file/pull dump strategy
 - [x] Unit tests (XML parsing with fixtures)
 
 ## Phase 4: Chrome DevTools Protocol — `cdp/` package
@@ -43,24 +45,34 @@ in [docs/work-breakdown.md](docs/work-breakdown.md) and
 ## Phase 5: Permissions — `permissions/` package
 > Handle Android runtime permission dialogs.
 
-- [x] `Grant` / `Deny` with API-level detection (23–29 vs 30+)
+- [x] `Grant` / `Deny` across permission-controller button variants
+- [x] Explicit `GrantSelected` for Android's limited-media flow
 - [x] `GrantAll` for multi-permission requests
 - [x] Unit tests
 
 ## Phase 6: Top-level API — `testkit.go`
 > Compose all packages into the `Device` handle.
 
-- [x] `Setup` — boot emulator → install APK → launch app → connect CDP
+- [x] `Setup` — start an AVD or attach by serial, install, launch, connect CDP
 - [x] `Teardown`, `RestartApp`, `ForceStop`
 - [x] `Config` with sensible defaults
-- [ ] Integration test example
+- [x] Explicit secondary-process WebView selection
+- [x] Integration test example
 
 ## Phase 7: Examples & Documentation
 > Real-world usage examples and polished docs.
 
-- [ ] Example test suite
-- [ ] CI workflow template
-- [ ] godoc comments on all public API
+- [x] Example test suite
+- [x] CI workflow template
+- [x] godoc comments on all public API
+
+## Phase 8: Council Review & Local Validation
+> Cross-package correctness and release-quality checks.
+
+- [x] Go, Android, CDP, test-infrastructure, and code-quality review
+- [x] Full race, vet, lint, build, module, formatting, and vulnerability checks
+- [x] SDK-free tagged example check in required CI
+- [x] External Android validation boundary recorded
 
 ---
 
@@ -70,5 +82,5 @@ in [docs/work-breakdown.md](docs/work-breakdown.md) and
 - Visual regression testing
 - Performance benchmarking
 - Network mocking/interception
-- Multiple simultaneous emulators
+- Multiple simultaneous test devices per suite
 - Flaky-test retry logic

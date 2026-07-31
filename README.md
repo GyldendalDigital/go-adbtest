@@ -89,7 +89,7 @@ defaults:
 
 | Field | Default |
 | --- | --- |
-| `GPU` | `swiftshader_indirect` in AVD mode |
+| `GPU` | `auto` in AVD mode |
 | `BootTimeout` | 120 seconds |
 | `AppTimeout` | 30 seconds |
 | `CDPPort` | 9222 |
@@ -104,12 +104,21 @@ required.
 discovered launchable activity; otherwise it falls back to Android's
 `cmd package resolve-activity` and `pm resolve-activity`. An explicit activity
 may be a short class, a dot-prefixed class, a fully qualified class, or a
-matching package/component.
+matching package/component. Set it explicitly for the most predictable behavior
+on older Android releases.
+
+`AppProcess` selects the process that hosts the debuggable WebView. It defaults
+to `AppPackage`; a relative secondary process such as `:webview` is expanded to
+`com.example.myapp:webview`. A fully qualified process name is also accepted.
+Setup matches every PID for that process against the device's actual WebView
+DevTools sockets and reports ambiguous matches instead of guessing.
 
 Setup cleans up resources acquired before any later failure. `Teardown` is
 idempotent and continues cleanup after individual errors. App launch, PID
 discovery, port forwarding, target discovery, and CDP connection use bounded
-contexts rather than fixed sleeps.
+contexts rather than fixed sleeps. CDP forwarding is exclusive: `Setup` fails
+instead of replacing an existing mapping for `CDPPort`, and teardown removes
+only a mapping created by this library.
 
 ## Attached-device setup
 
@@ -195,7 +204,7 @@ jobs:
           api-level: 35
           arch: x86_64
           emulator-options: >-
-            -no-window -gpu swiftshader_indirect -no-audio -no-boot-anim
+            -no-window -gpu software -no-audio -no-boot-anim
           script: |
             ./your-android-build-command
             export ADBTEST_APK="$PWD/path/to/app.apk"
@@ -205,13 +214,15 @@ jobs:
 ```
 
 `Setup` installs `ADBTEST_APK`; the CI build step should build it but need not
-run a separate `adb install`. A complete, copyable consumer test and workflow
-are available in [examples](examples/README.md).
+run a separate `adb install`. Installation uses `adb install -r`, so an existing
+installation's application data and granted permissions are retained. A
+complete, copyable consumer test and workflow is available in
+[examples](examples/README.md).
 
 ## Dependencies
 
 The only runtime dependency is
-[`nhooyr.io/websocket`](https://github.com/nhooyr/websocket).
+[`github.com/coder/websocket`](https://github.com/coder/websocket).
 
 ## Documentation
 

@@ -47,7 +47,7 @@ Examples:
 ```
 feat(adb): implement Shell and Install methods
 fix(cdp): handle WebSocket reconnection after app restart
-chore: bump nhooyr.io/websocket to v1.8.17
+chore: bump github.com/coder/websocket to v1.8.15
 docs: add CI integration example to README
 ```
 

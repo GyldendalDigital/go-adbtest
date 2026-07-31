@@ -16,6 +16,7 @@ jobs:
     env:
       ADBTEST_APK: ${{ github.workspace }}/app/build/outputs/apk/debug/app-debug.apk
       ADBTEST_APP_PACKAGE: com.example.app
+      # ADBTEST_APP_PROCESS: :webview # Uncomment for a secondary WebView process.
       ADBTEST_APP_ACTIVITY: .MainActivity
       ADBTEST_PERMISSION_TRIGGER_SELECTOR: "#request-permission"
       ADBTEST_RESULT_SELECTOR: "#permission-status"
