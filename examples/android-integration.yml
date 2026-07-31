@@ -56,6 +56,8 @@ jobs:
           arch: x86_64
           target: google_apis
           profile: small_phone
+          avd-name: go_adbtest_api_35
+          emulator-port: 5554
           cores: 2
           emulator-options: >-
             -no-window
@@ -65,8 +67,8 @@ jobs:
             -no-boot-anim
             -no-snapshot
           script: |
-            serial="$(adb devices | awk 'NR > 1 && $2 == "device" { print $1; exit }')"
-            test -n "$serial"
+            serial="emulator-${EMULATOR_PORT}"
+            adb -s "$serial" get-state
             ADBTEST_SERIAL="$serial" go test \
               -p=1 \
               -tags=android_integration \

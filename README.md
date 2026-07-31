@@ -26,7 +26,6 @@ package androidtest
 import (
     "fmt"
     "os"
-    "strings"
     "testing"
     "time"
 
@@ -36,7 +35,7 @@ import (
 var device *adbtest.Device
 
 func TestMain(m *testing.M) {
-    config := adbtest.HeadlessAVD("small_phone_api_34", "bin/myapp.apk")
+    config := adbtest.HeadlessAVD("small_phone_api_35", "bin/myapp.apk")
     config.AppPackage = "com.example.myapp"
     config.AppTimeout = 2 * time.Minute // Useful for slow Go/WebView startup.
     device = adbtest.Setup(config)
@@ -53,20 +52,109 @@ func TestMain(m *testing.M) {
 
 func TestLoginFlow(t *testing.T) {
     device.RestartApp(t)
+    device.CDP.WaitForSelector(t, "#login-btn", 15*time.Second)
     device.CDP.Click(t, "#login-btn")
     device.Permissions.Grant(t, 10*time.Second)
 
-    result := device.CDP.Eval(t,
-        `document.getElementById("status").textContent`)
-    if !strings.Contains(result, "logged in") {
-        t.Fatalf("expected login status, got %q", result)
-    }
+    result := device.CDP.WaitForText(
+        t,
+        "#status",
+        "logged in",
+        15*time.Second,
+    )
+    t.Logf("login status: %s", result)
 }
 ```
 
-`RestartApp` force-stops and relaunches the process, then reconnects CDP. It
-does not clear application data; tests that require cleared data must do so
-explicitly.
+## Finding and selecting an AVD
+
+`Config.AVD` is not a device model or a running-device serial. It is the exact
+command-line ID of an Android Virtual Device definition that already exists on
+the machine. These identifiers are related, but not interchangeable:
+
+| Identifier | Example | How to find it | Where it is used |
+| --- | --- | --- | --- |
+| AVD ID (command-line name) | `small_phone_api_35` | `emulator -list-avds` | `HeadlessAVD` or `Config.AVD` |
+| Hardware-profile ID | `small_phone` | `avdmanager list device -c` | AVD creation and the CI runner's `profile` input |
+| ADB serial | `emulator-5554` | `adb devices -l` | `Config.Serial` for an already-running device |
+
+For example, `Pixel_7` might be a locally chosen AVD ID, while `pixel_7`
+is a hardware-profile ID. Always copy the AVD ID from `emulator -list-avds`
+when using owned-AVD mode.
+
+### Find or create an AVD in Android Studio
+
+Open Android Studio's
+[Device Manager](https://developer.android.com/studio/run/managing-avds) from
+either location:
+
+- Welcome screen: **More Actions → Virtual Device Manager**
+- Open project: **View → Tool Windows → Device Manager**
+
+The **Virtual** tab lists the configured devices. Its friendly display name can
+differ from the command-line ID. Use the device's edit button, open **Show
+Advanced Settings**, and find **AVD ID**. Alternatively,
+[`emulator -list-avds`](https://developer.android.com/studio/run/emulator-commandline)
+prints the authoritative, copyable IDs accepted by this library. When an
+emulator is already running in a separate window, its title usually shows the
+display name and console port. Given its ADB serial, query the AVD ID directly
+with:
+
+```sh
+adb -s emulator-5554 emu avd name
+```
+
+To create a lightweight test device in Device Manager, select **Create Virtual
+Device**, choose the **Small Phone** hardware profile, and select a non-Play
+Store **Google APIs** image whose ABI matches the host. Use `x86_64` on
+x86-64 machines and GitHub's Ubuntu runners; use an available ARM image on an
+ARM host so hardware acceleration remains possible. Give the AVD a stable ID
+such as `small_phone_api_35`. A Play Store image is unnecessary unless the
+application specifically tests Play Store behavior.
+
+### Find or create an AVD from the command line
+
+List existing AVDs and available hardware profiles:
+
+```sh
+emulator -list-avds
+avdmanager list avd -c
+avdmanager list device -c
+```
+
+If those tools are not on `PATH`, invoke them below `ANDROID_HOME` or
+`ANDROID_SDK_ROOT`. For example, use `$ANDROID_HOME/emulator/emulator`,
+`$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager`, and
+`$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager` (or replace
+`ANDROID_HOME` with `ANDROID_SDK_ROOT`).
+
+The equivalent one-time creation flow is:
+
+```sh
+sdkmanager 'system-images;android-35;google_apis;x86_64'
+echo no | avdmanager create avd \
+  --name small_phone_api_35 \
+  --package 'system-images;android-35;google_apis;x86_64' \
+  --device small_phone
+
+emulator -list-avds
+emulator -accel-check
+```
+
+Pass one of the exact listed names to the library:
+
+```go
+config := adbtest.HeadlessAVD("small_phone_api_35", "bin/myapp.apk")
+config.AppPackage = "com.example.myapp"
+device = adbtest.Setup(config)
+```
+
+`HeadlessAVD` applies lightweight launch-time options, but it does not download
+the system image, create the AVD, or permanently rewrite its Device Manager
+settings. If a developer has already started the AVD manually, use its ADB
+`Serial` instead of asking the library to start a second instance. The root
+library does not read `ADBTEST_AVD` or `ADBTEST_APK` automatically; applications
+that use environment variables must pass their values into `Config` themselves.
 
 ## Setup modes and defaults
 
@@ -113,7 +201,7 @@ CPU, so `GPU: "auto"` is the best general default; use current
 software rendering. `swiftshader_indirect` is deprecated. `MemoryMB` is an
 advanced 1536–8192 MB override, not a guaranteed host-memory ceiling.
 [Android recommends GPU auto-selection and VM acceleration](https://developer.android.com/studio/run/emulator-acceleration).
-The one-time `sdkmanager`/`avdmanager` recipe is in the
+The same `sdkmanager`/`avdmanager` recipe is also included in the
 [integration example](examples/README.md#device-modes).
 
 Run one owned emulator per suite. If Android tests span several Go packages,
@@ -165,6 +253,164 @@ device = adbtest.Setup(adbtest.Config{
 
 This is the appropriate mode for `reactivecircus/android-emulator-runner`,
 which has already started the emulator before its script runs.
+
+## Using the device APIs
+
+`Setup` returns one `Device` that exposes the Android and WebView interaction
+surfaces used by a test:
+
+| API | Target | Typical values |
+| --- | --- | --- |
+| `device.CDP` | DOM inside the debuggable WebView | CSS selectors and JavaScript expressions |
+| `device.UI` | Native Android and system UI | Visible text, Android resource IDs, or screen coordinates |
+| `device.Permissions` | Android runtime-permission dialogs | Grant, deny, or limited-media choices |
+| `device.ADB` | Lower-level device operations | Shell commands, files, screenshots, and forwarding |
+
+The high-level CDP, UI, and permission helpers accept `testing.TB` and fail the
+current test with a descriptive error. CDP evaluation, native UI, and ADB also
+expose error-returning or context-aware primitives when a test needs lower-level
+control.
+
+### WebView interaction with `device.CDP`
+
+CDP selectors are CSS selectors evaluated in the current WebView document.
+They are not Android resource IDs. Prefer stable attributes such as
+`data-testid` over presentation-oriented classes:
+
+```go
+func TestCheckout(t *testing.T) {
+    const timeout = 15 * time.Second
+    const checkoutButton = `[data-testid="checkout"]`
+
+    device.RestartApp(t)
+    device.CDP.WaitForSelector(t, checkoutButton, timeout)
+    device.CDP.Click(t, checkoutButton)
+
+    device.CDP.WaitForText(
+        t,
+        `[data-testid="status"]`,
+        "Order complete",
+        timeout,
+    )
+}
+```
+
+`WaitForSelector` polls until the first matching element has non-zero bounds
+and is not hidden by its own or an ancestor's display, visibility, or opacity.
+`Click` itself does not wait: it uses `document.querySelector`, reads the first
+match's `getBoundingClientRect`, and sends CDP `mousePressed` and
+`mouseReleased` events at its center. This is a real input gesture rather than
+JavaScript `element.click()`, which matters for browser-gated actions such as
+file inputs. Call `WaitForSelector` first when the element may render
+asynchronously.
+
+`WaitForText` polls the first matching element until its `textContent` contains
+the requested case-sensitive substring, then returns the complete text. It
+does not require that element to be visible, so combine it with
+`WaitForSelector` when visibility is part of the assertion.
+
+Evaluate JavaScript directly when a semantic helper is not enough:
+
+```go
+title := device.CDP.Eval(t, `document.title`)
+countJSON := device.CDP.Eval(t, `document.querySelectorAll(".result").length`)
+profileJSON := device.CDP.Eval(t, `({name: "Ada", active: true})`)
+ready := device.CDP.EvalAsync(t, `Promise.resolve("ready")`)
+
+t.Log(title, countJSON, profileJSON, ready)
+```
+
+`Eval` returns JavaScript strings directly, serializable non-string values as
+JSON text, and special values such as `undefined` or `NaN` in CDP notation.
+`EvalAsync` additionally waits for a returned Promise. JavaScript exceptions,
+invalid selectors, protocol errors, missing elements in `Click`, and expired
+timeouts fail the test. Use `EvalE` or `EvalContext` when the caller needs an
+error instead of `t.Fatalf`.
+
+### Native Android interaction with `device.UI`
+
+Native helpers inspect the `uiautomator` hierarchy. Text matching is a
+case-sensitive substring; resource ID matching is exact and normally includes
+the package prefix:
+
+```go
+device.UI.WaitForText(t, "Choose a file", 10*time.Second)
+device.UI.TapOnText(t, "Downloads", 10*time.Second)
+device.UI.LongPressOnText(t, "report.pdf", 10*time.Second)
+device.UI.TapOnID(
+    t,
+    "com.example.myapp:id/submit",
+    10*time.Second,
+)
+
+device.UI.AssertVisible(t, "Upload complete")
+device.UI.AssertGone(t, "Loading")
+
+if err := device.UI.TypeText("hello world"); err != nil {
+    t.Fatal(err)
+}
+```
+
+The wait and tap helpers use the interactor's ten-second default when no
+positive timeout is supplied. `TapOnText` prefers a clickable match;
+`TapOnID` selects the first exact resource-ID match. `AssertVisible` and
+`AssertGone` check text presence in one current hierarchy dump—they do not
+poll or independently verify screen bounds—so use `WaitForText` first for
+asynchronous UI. Inspect `Dump()` when you need the exact package-qualified ID
+used by the current Android image. `Dump`, coordinate `Tap`, and their context
+variants are available as error-returning primitives.
+
+### Runtime permissions with `device.Permissions`
+
+Trigger the permission request in the application first, then handle the
+native Android dialog:
+
+```go
+device.CDP.WaitForSelector(t, "#request-permissions", 10*time.Second)
+device.CDP.Click(t, "#request-permissions")
+device.Permissions.GrantAll(t, 15*time.Second)
+
+// Alternatives for one current dialog:
+// device.Permissions.Grant(t)
+// device.Permissions.Deny(t)
+// device.Permissions.GrantSelected(t) // Caller completes the system picker.
+```
+
+`Grant` prefers the most complete recognized access choice. `GrantAll` handles
+up to five sequential dialogs under one total timeout. Dialog matching is
+restricted to known Android permission-controller and package-installer
+packages, so application-owned text such as “Allow” is ignored. The default
+timeout is ten seconds. `IsVisible` is observational and returns false if the
+hierarchy cannot be read; do not use it as the sole test assertion.
+
+### Application lifecycle and lower-level ADB
+
+`RestartApp(t)` is the normal per-test reset. It force-stops the app, launches
+it again, rediscovers the WebView process, and reconnects CDP while retaining
+application data and granted permissions.
+
+`ForceStop` only stops the app, while `LaunchApp` only requests a launch. A
+manual stop/start sequence must reconnect CDP explicitly:
+
+```go
+if err := device.ForceStop(); err != nil {
+    t.Fatal(err)
+}
+device.LaunchApp(t)
+device.CDP.Reconnect(t)
+device.CDP.WaitForSelector(t, "html", 15*time.Second)
+```
+
+Prefer `RestartApp` unless the stopped interval itself is under test. For
+operations without a dedicated helper, use the serial-pinned ADB client:
+
+```go
+androidVersion := device.ADB.ShellOrFail(t, "getprop ro.build.version.release")
+if err := device.ADB.Screencap("failure.png"); err != nil {
+    t.Fatal(err)
+}
+t.Logf("Android %s", androidVersion)
+```
 
 ## Features
 
@@ -218,8 +464,29 @@ go test -p=1 -tags android_integration -timeout 5m ./...
 
 ## CI with an attached emulator
 
-The emulator runner owns the emulator, so the test configuration must use the
-serial exported below rather than `AVD`:
+GitHub-hosted runners do not have one of your workstation's AVDs to select.
+[`reactivecircus/android-emulator-runner`](https://github.com/ReactiveCircus/android-emulator-runner)
+installs the requested image, creates an ephemeral AVD, boots it, runs the
+script, and stops it. Its relevant inputs have distinct roles:
+
+| Runner input | Selects |
+| --- | --- |
+| `api-level`, `target`, `arch` | Android system image |
+| `profile` | Hardware-profile ID, such as `small_phone` |
+| `avd-name` | Name assigned to the CI-created AVD |
+| `emulator-port` | Console port and therefore ADB serial, such as `emulator-5554` |
+| `cores` | Virtual CPU count |
+
+Because the runner owns the emulator lifecycle, the Go test must attach with
+`Serial`; using `AVD` or `HeadlessAVD` here would attempt to start a second
+emulator. The action exposes `EMULATOR_PORT` inside its script, so the serial
+can be selected deterministically instead of taking the first result from
+`adb devices`:
+
+Setting `emulator-options` replaces the action's complete default option list,
+which is why the example repeats every required headless/safety option. If the
+port is customized, choose an unused even console port so the emulator remains
+discoverable by ADB.
 
 ```yaml
 jobs:
@@ -242,22 +509,34 @@ jobs:
           arch: x86_64
           target: google_apis
           profile: small_phone
+          avd-name: go_adbtest_api_35
+          emulator-port: 5554
           cores: 2
           emulator-options: >-
             -no-window -gpu auto -accel on -no-audio -no-boot-anim -no-snapshot
           script: |
             ./your-android-build-command
             export ADBTEST_APK="$PWD/path/to/app.apk"
-            export ADBTEST_SERIAL="$(adb devices | awk 'NR > 1 && $2 == "device" { print $1; exit }')"
-            test -n "$ADBTEST_SERIAL"
+            export ADBTEST_SERIAL="emulator-${EMULATOR_PORT}"
+            adb -s "$ADBTEST_SERIAL" get-state
             go test -p=1 -tags android_integration -timeout 5m ./...
 ```
+
+This workflow assumes `TestMain` uses the attached-device configuration shown
+above and reads `ADBTEST_SERIAL`. Exporting the variable does not alter a
+hard-coded `HeadlessAVD` call.
 
 `Setup` installs `ADBTEST_APK`; the CI build step should build it but need not
 run a separate `adb install`. Installation uses `adb install -r`, so an existing
 installation's application data and granted permissions are retained. A
 complete, copyable consumer test and workflow is available in
 [examples](examples/README.md).
+
+On a persistent self-hosted runner, the library can own an AVD instead. Create
+it once under a stable name, confirm that name with `emulator -list-avds`, and
+pass it to `HeadlessAVD`. Do not manually start that same AVD first. In either
+CI mode, keep `go test -p=1` so multiple package-level `TestMain` functions do
+not launch emulators concurrently.
 
 ## Dependencies
 

@@ -149,6 +149,7 @@ socket/forward ownership, current emulator GPU defaults, and all lint findings.
 | 2026-07-31 | Prevented unaccelerated safe-profile boots | Commit `6efa95b` exposes validated acceleration modes and makes `HeadlessAVD` use `-accel on`, failing fast without a usable hypervisor |
 | 2026-07-31 | Added lightweight cross-boundary example | Commit `3999a1c` keeps lifecycle/CDP always on, makes DocumentsUI and permissions opt-in, uses unique fixtures, and supplies a small-phone serial CI template |
 | 2026-07-31 | Completed final M9 validation | Full race, vet, lint (normal and tagged), builds, module checks, tagged example, YAML parsing, diff checks, and govulncheck pass; no emulator was started |
+| 2026-07-31 | Expanded public AVD and API guidance | README now distinguishes AVD names, hardware profiles, and ADB serials; documents Android Studio, CLI, and deterministic CI selection; and explains CDP, native UI, permissions, lifecycle, and ADB usage. No emulator was started |
 
 ## Next Action
 

@@ -103,7 +103,6 @@ intentionally explicit and outside `Setup`):
 ```sh
 sdkmanager 'system-images;android-34;google_apis;x86_64'
 echo no | avdmanager create avd \
-  --force \
   --name small_phone_api_34 \
   --package 'system-images;android-34;google_apis;x86_64' \
   --device small_phone
@@ -138,7 +137,10 @@ ADBTEST_SERIAL=emulator-5554 \
 go test -p=1 -tags=android_integration -count=1 -timeout=10m ./integration/...
 ```
 
-The CI template uses serial mode because the emulator action owns the emulator.
+The CI template uses serial mode because the emulator action creates and owns
+the emulator. Its `profile: small_phone` input is a hardware-profile ID, not an
+AVD name for `HeadlessAVD`. The template fixes `emulator-port: 5554` and uses
+the action's `EMULATOR_PORT` value to select `emulator-5554` deterministically.
 Setup installs with `adb install -r`, which retains existing application data
 and permission state. Reset that state explicitly when test isolation requires
 it. The configured CDP port must also be free; go-adbtest will not replace a
