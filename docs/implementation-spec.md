@@ -35,7 +35,9 @@ func TestMain(m *testing.M) {
         APK:        "bin/myapp.apk",
         AppPackage: "com.example.myapp",
         Headless:   true,
+        GPU:        "software",
         NoAudio:    true,
+        NoSnapshot: true,
     })
 
     code := m.Run()
@@ -90,6 +92,7 @@ type Config struct {
     GPU         string
     NoAudio     bool
     WipeData    bool
+    NoSnapshot  bool
     BootTimeout time.Duration
     AppTimeout  time.Duration
     CDPPort     int
@@ -103,8 +106,9 @@ Exactly one of `AVD` and `Serial` is required:
   `Device` never stops that device, and `Device.Emulator` is `nil`.
 
 The library never implicitly chooses the first connected device. `Headless`,
-`GPU`, `NoAudio`, and `WipeData` apply only in AVD mode and are rejected in
-attached mode.
+`GPU`, `NoAudio`, `WipeData`, and `NoSnapshot` apply only in AVD mode and are
+rejected in attached mode. `NoSnapshot` passes the emulator's `-no-snapshot`
+option, forcing a cold boot and disabling automatic snapshot saving.
 
 Boolean fields retain normal Go zero-value semantics: `false` remains false.
 There are no hidden `true` defaults. The non-boolean zero-value defaults are:

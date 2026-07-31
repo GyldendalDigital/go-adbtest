@@ -174,6 +174,7 @@ func TestNormalizeConfigPreservesExplicitValues(t *testing.T) {
 		GPU:         " host ",
 		NoAudio:     true,
 		WipeData:    true,
+		NoSnapshot:  true,
 		BootTimeout: 45 * time.Second,
 		AppTimeout:  12 * time.Second,
 		CDPPort:     9333,
@@ -187,7 +188,7 @@ func TestNormalizeConfigPreservesExplicitValues(t *testing.T) {
 		got.AppActivity != ".MainActivity" || got.GPU != "host" {
 		t.Fatalf("trimmed config = %+v", got)
 	}
-	if !got.Headless || !got.NoAudio || !got.WipeData || got.BootTimeout != 45*time.Second ||
+	if !got.Headless || !got.NoAudio || !got.WipeData || !got.NoSnapshot || got.BootTimeout != 45*time.Second ||
 		got.AppTimeout != 12*time.Second || got.CDPPort != 9333 {
 		t.Fatalf("explicit values changed: %+v", got)
 	}
@@ -207,6 +208,7 @@ func TestNormalizeConfigRejectsInvalidInput(t *testing.T) {
 		{name: "negative port", cfg: Config{AVD: "a", APK: testAPK, CDPPort: -1}, want: "CDPPort"},
 		{name: "large port", cfg: Config{AVD: "a", APK: testAPK, CDPPort: 65536}, want: "CDPPort"},
 		{name: "AVD option with serial", cfg: Config{Serial: "s", APK: testAPK, NoAudio: true}, want: "apply only"},
+		{name: "snapshot option with serial", cfg: Config{Serial: "s", APK: testAPK, NoSnapshot: true}, want: "apply only"},
 		{name: "invalid package", cfg: Config{AVD: "a", APK: testAPK, AppPackage: "bad package"}, want: "invalid package"},
 		{name: "invalid process", cfg: Config{AVD: "a", APK: testAPK, AppProcess: "bad process"}, want: "invalid app process"},
 		{name: "multiple process separators", cfg: Config{AVD: "a", APK: testAPK, AppProcess: "app:a:b"}, want: "invalid app process"},
@@ -428,6 +430,7 @@ func TestSetupAVDOrchestratesAndAppliesEffectiveConfig(t *testing.T) {
 	cfg.Headless = true
 	cfg.NoAudio = true
 	cfg.WipeData = true
+	cfg.NoSnapshot = true
 
 	device, err := setupWithDependencies(cfg, &deps)
 	if err != nil {
@@ -441,7 +444,8 @@ func TestSetupAVDOrchestratesAndAppliesEffectiveConfig(t *testing.T) {
 		t.Fatalf("effective app config = %+v", device.Config)
 	}
 	if emulatorConfig.AVD != cfg.AVD || emulatorConfig.GPU != defaultGPU || !emulatorConfig.Headless ||
-		!emulatorConfig.NoAudio || !emulatorConfig.WipeData || emulatorConfig.Timeout != defaultBootTimeout {
+		!emulatorConfig.NoAudio || !emulatorConfig.WipeData || !emulatorConfig.NoSnapshot ||
+		emulatorConfig.Timeout != defaultBootTimeout {
 		t.Fatalf("emulator config = %+v", emulatorConfig)
 	}
 	wantEvents := "stat:" + testAPK + "|inspect:" + testAPK + "|start:Pixel_7|new-ui|new-permissions|" +

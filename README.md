@@ -41,7 +41,9 @@ func TestMain(m *testing.M) {
         APK:        "bin/myapp.apk",
         AppPackage: "com.example.myapp",
         Headless:   true,
+        GPU:        "software",
         NoAudio:    true,
+        NoSnapshot: true,
     })
 
     code := m.Run()
@@ -80,8 +82,8 @@ Exactly one device mode is required:
   closes CDP and force-stops the launched app, but does not stop that device.
 
 Selection is always explicit; `Setup` never guesses among connected devices.
-AVD-only fields (`Headless`, `GPU`, `NoAudio`, and `WipeData`) must not be set
-with `Serial`.
+AVD-only fields (`Headless`, `GPU`, `NoAudio`, `WipeData`, and `NoSnapshot`)
+must not be set with `Serial`.
 
 The zero value of every boolean remains `false`. Set `Headless: true` and
 `NoAudio: true` explicitly when desired. Other zero values receive these
@@ -93,6 +95,11 @@ defaults:
 | `BootTimeout` | 120 seconds |
 | `AppTimeout` | 30 seconds |
 | `CDPPort` | 9222 |
+
+For a conservative headless CI profile, set `Headless: true`,
+`GPU: "software"`, `NoAudio: true`, and `NoSnapshot: true`. `NoSnapshot`
+forces a cold boot and prevents a failed run from saving unstable quick-boot
+state.
 
 `APK` is always required. `AppPackage` may be omitted when Android `aapt` is
 available; package inspection happens before an emulator is started. `aapt`

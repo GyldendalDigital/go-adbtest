@@ -52,6 +52,8 @@ type Config struct {
 	NoAudio bool
 	// WipeData wipes an owned AVD before boot.
 	WipeData bool
+	// NoSnapshot cold-boots an owned AVD and disables automatic snapshot saving.
+	NoSnapshot bool
 	// BootTimeout bounds AVD boot or attached-device readiness. Zero means 120 seconds.
 	BootTimeout time.Duration
 	// AppTimeout bounds each app operation, including APK inspection, install,
@@ -251,12 +253,13 @@ func setupWithDependencies(cfg Config, deps *testkitDependencies) (*Device, erro
 
 	if cfg.AVD != "" {
 		instance, startErr := deps.startEmulator(emulator.Config{
-			AVD:      cfg.AVD,
-			Headless: cfg.Headless,
-			GPU:      cfg.GPU,
-			NoAudio:  cfg.NoAudio,
-			WipeData: cfg.WipeData,
-			Timeout:  cfg.BootTimeout,
+			AVD:        cfg.AVD,
+			Headless:   cfg.Headless,
+			GPU:        cfg.GPU,
+			NoAudio:    cfg.NoAudio,
+			WipeData:   cfg.WipeData,
+			NoSnapshot: cfg.NoSnapshot,
+			Timeout:    cfg.BootTimeout,
 		})
 		if instance != nil {
 			device.Emulator = instance
@@ -373,8 +376,8 @@ func normalizeConfig(cfg Config) (Config, error) {
 	if cfg.CDPPort < 0 || cfg.CDPPort > 65535 {
 		return Config{}, fmt.Errorf("CDPPort must be between 1 and 65535, got %d", cfg.CDPPort)
 	}
-	if cfg.Serial != "" && (cfg.Headless || cfg.GPU != "" || cfg.NoAudio || cfg.WipeData) {
-		return Config{}, errors.New("headless, GPU, NoAudio, and WipeData apply only when AVD is set")
+	if cfg.Serial != "" && (cfg.Headless || cfg.GPU != "" || cfg.NoAudio || cfg.WipeData || cfg.NoSnapshot) {
+		return Config{}, errors.New("headless, GPU, NoAudio, WipeData, and NoSnapshot apply only when AVD is set")
 	}
 	if cfg.AppPackage != "" {
 		if err := validatePackageName(cfg.AppPackage); err != nil {

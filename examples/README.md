@@ -62,6 +62,7 @@ Optional settings are:
 | `ADBTEST_HEADLESS` | `false` | Start an owned AVD without a window. |
 | `ADBTEST_NO_AUDIO` | `false` | Disable audio for an owned AVD. |
 | `ADBTEST_WIPE_DATA` | `false` | Wipe an owned AVD before starting it. |
+| `ADBTEST_NO_SNAPSHOT` | `false` | Cold-boot an owned AVD without loading or saving quick-boot state. |
 
 The trigger fixture must actually cause the application to request a runtime
 permission. `GrantAll` safely returns when no permission dialog appears, but in
@@ -77,6 +78,9 @@ In AVD mode, go-adbtest starts, owns, and stops the emulator:
 ADBTEST_APK="$PWD/app/build/outputs/apk/debug/app-debug.apk" \
 ADBTEST_AVD=Pixel_API_35 \
 ADBTEST_HEADLESS=true \
+ADBTEST_GPU=software \
+ADBTEST_NO_AUDIO=true \
+ADBTEST_NO_SNAPSHOT=true \
 ADBTEST_PERMISSION_TRIGGER_SELECTOR='#request-permission' \
 ADBTEST_RESULT_SELECTOR='#permission-status' \
 ADBTEST_EXPECTED_TEXT=granted \

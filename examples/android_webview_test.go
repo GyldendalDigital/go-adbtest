@@ -141,6 +141,7 @@ func TestExampleConfigurationModes(t *testing.T) {
 				"ADBTEST_HEADLESS":    "true",
 				"ADBTEST_NO_AUDIO":    "true",
 				"ADBTEST_WIPE_DATA":   "true",
+				"ADBTEST_NO_SNAPSHOT": "true",
 				"ADBTEST_GPU":         "auto",
 			}),
 			assert: func(t *testing.T, config adbtest.Config) {
@@ -148,7 +149,7 @@ func TestExampleConfigurationModes(t *testing.T) {
 				if config.AVD != "Pixel_API_35" || config.Serial != "" {
 					t.Fatalf("unexpected AVD config: %+v", config)
 				}
-				if !config.Headless || !config.NoAudio || !config.WipeData {
+				if !config.Headless || !config.NoAudio || !config.WipeData || !config.NoSnapshot {
 					t.Fatalf("AVD flags were not applied: %+v", config)
 				}
 				if config.AppProcess != ":webview" {
@@ -279,12 +280,17 @@ func loadExampleEnvironment(getenv func(string) string) (adbtest.Config, fixture
 		if err != nil {
 			return adbtest.Config{}, fixtureConfig{}, "", fmt.Errorf("ADBTEST_WIPE_DATA: %w", err)
 		}
+		config.NoSnapshot, err = optionalBool(value("ADBTEST_NO_SNAPSHOT"))
+		if err != nil {
+			return adbtest.Config{}, fixtureConfig{}, "", fmt.Errorf("ADBTEST_NO_SNAPSHOT: %w", err)
+		}
 	} else {
 		for _, name := range []string{
 			"ADBTEST_GPU",
 			"ADBTEST_HEADLESS",
 			"ADBTEST_NO_AUDIO",
 			"ADBTEST_WIPE_DATA",
+			"ADBTEST_NO_SNAPSHOT",
 		} {
 			if value(name) != "" {
 				return adbtest.Config{}, fixtureConfig{}, "", fmt.Errorf("%s is only valid with ADBTEST_AVD", name)
