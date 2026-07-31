@@ -31,29 +31,48 @@ const (
 // Config describes the device and application used by an Android integration
 // test suite. Exactly one of AVD and Serial must be set.
 type Config struct {
-	AVD         string
-	Serial      string
-	APK         string
-	AppPackage  string
+	// AVD names an emulator to start and own. It is mutually exclusive with Serial.
+	AVD string
+	// Serial selects an already-running device that will not be stopped at teardown.
+	Serial string
+	// APK is the path to the application package installed during setup.
+	APK string
+	// AppPackage is the Android application ID. When empty, aapt inspects APK.
+	AppPackage string
+	// AppActivity optionally identifies the launcher activity or full component.
 	AppActivity string
-	Headless    bool
-	GPU         string
-	NoAudio     bool
-	WipeData    bool
+	// Headless starts an owned AVD without a window.
+	Headless bool
+	// GPU selects the GPU mode for an owned AVD. Zero uses swiftshader_indirect.
+	GPU string
+	// NoAudio disables audio for an owned AVD.
+	NoAudio bool
+	// WipeData wipes an owned AVD before boot.
+	WipeData bool
+	// BootTimeout bounds AVD boot or attached-device readiness. Zero means 120 seconds.
 	BootTimeout time.Duration
-	AppTimeout  time.Duration
-	CDPPort     int
+	// AppTimeout bounds APK inspection, install, launch, and CDP readiness operations.
+	// Zero means 30 seconds.
+	AppTimeout time.Duration
+	// CDPPort is the host TCP port used for WebView forwarding. Zero means 9222.
+	CDPPort int
 }
 
 // Device is the main handle for interacting with a configured Android test
 // device and its WebView application.
 type Device struct {
-	Emulator    *emulator.Instance
-	ADB         *adb.Client
-	UI          *ui.Interactor
-	CDP         *cdp.Client
+	// Emulator is the owned emulator instance, or nil in attached-device mode.
+	Emulator *emulator.Instance
+	// ADB is pinned to the configured or newly started device.
+	ADB *adb.Client
+	// UI provides native Android UI interaction.
+	UI *ui.Interactor
+	// CDP provides WebView DOM and JavaScript interaction.
+	CDP *cdp.Client
+	// Permissions handles Android runtime permission dialogs.
 	Permissions *permissions.Handler
-	Config      Config
+	// Config contains normalized defaults and resolved application metadata.
+	Config Config
 
 	component    string
 	deps         testkitDependencies

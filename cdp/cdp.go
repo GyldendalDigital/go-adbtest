@@ -1,3 +1,5 @@
+// Package cdp connects to an Android WebView's Chrome DevTools Protocol
+// endpoint and provides test-oriented DOM and JavaScript interactions.
 package cdp
 
 import (
@@ -19,9 +21,13 @@ const (
 
 // Client provides high-level WebView interactions over CDP.
 type Client struct {
-	Conn       *Conn
-	ADB        *adb.Client
-	LocalPort  int
+	// Conn is the active CDP WebSocket connection.
+	Conn *Conn
+	// ADB is the device client used to discover the app and manage forwarding.
+	ADB *adb.Client
+	// LocalPort is the host TCP port forwarded to the WebView DevTools socket.
+	LocalPort int
+	// AppPackage is the Android application package whose WebView is targeted.
 	AppPackage string
 }
 

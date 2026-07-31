@@ -19,8 +19,10 @@ const (
 
 // Interactor provides native UI interactions via uiautomator + adb input.
 type Interactor struct {
-	ADB     *adb.Client
-	Timeout time.Duration // default wait timeout
+	// ADB is the device client used for hierarchy dumps and input commands.
+	ADB *adb.Client
+	// Timeout is the default wait timeout used when a helper has no override.
+	Timeout time.Duration
 }
 
 // NewInteractor creates an Interactor with the given ADB client.

@@ -24,20 +24,30 @@ const (
 
 // Config holds emulator launch options.
 type Config struct {
-	AVD        string        // AVD name (e.g. "Pixel_7")
-	Headless   bool          // -no-window
-	GPU        string        // "swiftshader_indirect" (safe), "host" (fast)
-	NoAudio    bool          // -no-audio
-	WipeData   bool          // -wipe-data (clean state)
-	NoSnapshot bool          // -no-snapshot
-	Timeout    time.Duration // boot timeout (default 120s)
+	// AVD is the configured Android Virtual Device name, for example "Pixel_7".
+	AVD string
+	// Headless adds the emulator's -no-window option.
+	Headless bool
+	// GPU selects the emulator GPU mode, such as "swiftshader_indirect" or "host".
+	GPU string
+	// NoAudio adds the emulator's -no-audio option.
+	NoAudio bool
+	// WipeData starts the emulator with -wipe-data.
+	WipeData bool
+	// NoSnapshot disables loading and saving emulator snapshots.
+	NoSnapshot bool
+	// Timeout bounds serial detection and boot completion. Zero means 120 seconds.
+	Timeout time.Duration
 }
 
 // Instance represents a running emulator.
 type Instance struct {
-	PID    int
-	Serial string // e.g. "emulator-5554"
-	ADB    *adb.Client
+	// PID is the host emulator process ID.
+	PID int
+	// Serial is the adb emulator serial, for example "emulator-5554".
+	Serial string
+	// ADB is a client pinned to Serial.
+	ADB *adb.Client
 
 	cmd             *exec.Cmd
 	done            chan struct{}

@@ -76,6 +76,7 @@ type permissionUI interface {
 
 // Handler interacts with Android runtime permission dialogs.
 type Handler struct {
+	// UI is the native-UI interactor used to inspect and tap permission dialogs.
 	UI *ui.Interactor
 
 	// These fields are deterministic test seams. Production handlers use UI,

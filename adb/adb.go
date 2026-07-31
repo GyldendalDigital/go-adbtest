@@ -16,12 +16,16 @@ import (
 
 // Client wraps adb commands targeting a specific device/emulator.
 type Client struct {
-	Serial  string // e.g. "emulator-5554"; empty = first device
-	ADBPath string // path to adb binary
+	// Serial is the explicit adb device serial, for example "emulator-5554".
+	// When empty, adb applies its normal device-selection rules and may fail if
+	// more than one device is connected.
+	Serial string
+	// ADBPath is the path to the adb executable.
+	ADBPath string
 }
 
 // New creates a Client, auto-detecting the adb path.
-// If serial is empty, commands target the first connected device.
+// If serial is empty, adb applies its normal device-selection rules.
 func New(serial string) (*Client, error) {
 	path, err := findADB()
 	if err != nil {

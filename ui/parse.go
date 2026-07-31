@@ -1,3 +1,5 @@
+// Package ui parses Android uiautomator hierarchies and provides semantic
+// native-UI interactions through adb.
 package ui
 
 import (
@@ -10,18 +12,28 @@ import (
 
 // Element represents a UI element from the uiautomator hierarchy dump.
 type Element struct {
-	Text        string
-	ResourceID  string
+	// Text is the element's visible text.
+	Text string
+	// ResourceID is the Android resource identifier from the hierarchy.
+	ResourceID string
+	// ContentDesc is the element's accessibility content description.
 	ContentDesc string
-	Class       string
-	Package     string
-	Clickable   bool
-	Bounds      Rect
+	// Class is the fully qualified Android view class.
+	Class string
+	// Package is the package that owns the element.
+	Package string
+	// Clickable reports the hierarchy's clickable attribute.
+	Clickable bool
+	// Bounds is the element's screen rectangle in physical pixels.
+	Bounds Rect
 }
 
 // Rect represents the bounding rectangle of a UI element.
 type Rect struct {
-	X1, Y1, X2, Y2 int
+	// X1 and Y1 are the top-left coordinates.
+	X1, Y1 int
+	// X2 and Y2 are the bottom-right coordinates.
+	X2, Y2 int
 }
 
 // CenterX returns the horizontal center of the rectangle.
