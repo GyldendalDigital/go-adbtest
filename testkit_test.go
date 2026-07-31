@@ -879,7 +879,6 @@ func TestLifecycleRejectsCommandReportedErrors(t *testing.T) {
 	for _, output := range []string{
 		"Error: Activity class does not exist",
 		"Error type 3\nError: Activity class does not exist",
-		"Starting: Intent\nStatus: timeout\nComplete",
 	} {
 		deps := fakeDependencies(&eventLog{})
 		deps.shellADB = func(context.Context, *adb.Client, string) (string, error) {
@@ -898,6 +897,26 @@ func TestLifecycleRejectsCommandReportedErrors(t *testing.T) {
 		if !device.appLaunched {
 			t.Fatal("failed launch was not marked for cleanup")
 		}
+	}
+}
+
+func TestLaunchAcceptsActivityManagerWaitTimeout(t *testing.T) {
+	deps := fakeDependencies(&eventLog{})
+	deps.shellADB = func(context.Context, *adb.Client, string) (string, error) {
+		return "Starting: Intent\nStatus: timeout\nComplete", nil
+	}
+	device := &Device{
+		ADB:       &adb.Client{},
+		Config:    Config{AppPackage: testPackage, AppTimeout: time.Second},
+		component: testPackage + "/.MainActivity",
+		deps:      deps,
+	}
+
+	if err := device.launchAppContext(context.Background()); err != nil {
+		t.Fatalf("launchAppContext() rejected an activity-manager wait timeout: %v", err)
+	}
+	if !device.appLaunched {
+		t.Fatal("launch was not marked for cleanup")
 	}
 }
 

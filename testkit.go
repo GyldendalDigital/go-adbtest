@@ -906,7 +906,12 @@ func activityStartOutputError(output string) string {
 		if !strings.HasPrefix(line, "Status:") {
 			continue
 		}
-		if !strings.EqualFold(strings.TrimSpace(strings.TrimPrefix(line, "Status:")), "ok") {
+		status := strings.TrimSpace(strings.TrimPrefix(line, "Status:"))
+		// Activity Manager can stop waiting for the first rendered frame and
+		// report "timeout" even though it successfully delivered the intent.
+		// Setup and RestartApp subsequently prove readiness through CDP, while
+		// actual launch failures are reported as Error/Error type lines above.
+		if !strings.EqualFold(status, "ok") && !strings.EqualFold(status, "timeout") {
 			return line
 		}
 	}
