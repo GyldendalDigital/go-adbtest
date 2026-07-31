@@ -71,8 +71,8 @@ func ParseDump(xmlData []byte) ([]Element, error) {
 	}
 
 	var elements []Element
-	for _, node := range hierarchy.Children {
-		if err := flattenNode(node, &elements); err != nil {
+	for index := range hierarchy.Children {
+		if err := flattenNode(&hierarchy.Children[index], &elements); err != nil {
 			return nil, err
 		}
 	}
@@ -80,7 +80,10 @@ func ParseDump(xmlData []byte) ([]Element, error) {
 }
 
 // flattenNode recursively flattens the XML tree into a slice.
-func flattenNode(node xmlNode, elements *[]Element) error {
+func flattenNode(node *xmlNode, elements *[]Element) error {
+	if node == nil {
+		return fmt.Errorf("parse ui dump: nil XML node")
+	}
 	bounds, err := parseBounds(node.Bounds)
 	if err != nil {
 		return fmt.Errorf("parse bounds for element text=%q resource-id=%q: %w", node.Text, node.ResourceID, err)
@@ -94,8 +97,8 @@ func flattenNode(node xmlNode, elements *[]Element) error {
 		Clickable:   node.Clickable == "true",
 		Bounds:      bounds,
 	})
-	for _, child := range node.Children {
-		if err := flattenNode(child, elements); err != nil {
+	for index := range node.Children {
+		if err := flattenNode(&node.Children[index], elements); err != nil {
 			return err
 		}
 	}

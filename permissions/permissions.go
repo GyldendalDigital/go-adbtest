@@ -3,6 +3,7 @@
 package permissions
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -15,7 +16,7 @@ import (
 const (
 	defaultTimeout             = 10 * time.Second
 	permissionPollInterval     = 500 * time.Millisecond
-	permissionTransitionDelay  = time.Second
+	permissionTransitionWindow = 2 * time.Second
 	maxSequentialPermissionOps = 5
 )
 
@@ -23,6 +24,11 @@ const (
 // access level Grant should prefer when a dialog offers multiple options.
 var (
 	grantButtonChoices = []buttonChoice{
+		{
+			name:        "allow all",
+			resourceIDs: []string{"permission_allow_all_button"},
+			texts:       []string{"Allow all", "Allow all photos", "Allow all photos and videos", "Allow all videos"},
+		},
 		{
 			name:        "allow while using the app",
 			resourceIDs: []string{"permission_allow_foreground_only_button"},
@@ -39,6 +45,13 @@ var (
 			texts:       []string{"Allow", "ALLOW"},
 		},
 	}
+	selectedButtonChoices = []buttonChoice{
+		{
+			name:        "select limited media access",
+			resourceIDs: []string{"permission_allow_selected_button"},
+			texts:       []string{"Select photos", "Select videos", "Select photos and videos"},
+		},
+	}
 	denyButtonChoices = []buttonChoice{
 		{
 			name:        "don't allow",
@@ -52,6 +65,11 @@ var (
 		{
 			name:        "deny and don't ask again",
 			resourceIDs: []string{"permission_deny_and_dont_ask_again_button"},
+		},
+		{
+			name:        "don't allow more selected media",
+			resourceIDs: []string{"permission_dont_allow_more_selected_button"},
+			texts:       []string{"Don't allow more", "Don’t allow more"},
 		},
 	}
 
@@ -70,11 +88,12 @@ type buttonChoice struct {
 }
 
 type permissionUI interface {
-	Dump() ([]ui.Element, error)
-	Tap(x, y int) error
+	DumpContext(context.Context) ([]ui.Element, error)
+	TapContext(context.Context, int, int) error
 }
 
-// Handler interacts with Android runtime permission dialogs.
+// Handler interacts with Android runtime permission dialogs. Helper methods use
+// the first positive timeout override and otherwise wait up to ten seconds.
 type Handler struct {
 	// UI is the native-UI interactor used to inspect and tap permission dialogs.
 	UI *ui.Interactor
@@ -91,7 +110,8 @@ func NewHandler(interactor *ui.Interactor) *Handler {
 	return &Handler{UI: interactor}
 }
 
-// Grant taps the preferred allow option on the current permission dialog.
+// Grant taps the most complete recognized allow option on the current
+// permission dialog, preferring full access over foreground or one-time access.
 func (h *Handler) Grant(t testing.TB, timeout ...time.Duration) {
 	t.Helper()
 	if err := h.grant(resolveTimeout(timeout)); err != nil {
@@ -99,7 +119,16 @@ func (h *Handler) Grant(t testing.TB, timeout ...time.Duration) {
 	}
 }
 
-// Deny taps "Don't allow" / "Deny" on the current permission dialog.
+// GrantSelected taps Android's selected-media option. That option can open the
+// system photo picker, which the caller must complete separately.
+func (h *Handler) GrantSelected(t testing.TB, timeout ...time.Duration) {
+	t.Helper()
+	if err := h.grantSelected(resolveTimeout(timeout)); err != nil {
+		t.Fatalf("grant selected-media permission: %v", err)
+	}
+}
+
+// Deny taps a recognized full-denial option on the current permission dialog.
 func (h *Handler) Deny(t testing.TB, timeout ...time.Duration) {
 	t.Helper()
 	if err := h.deny(resolveTimeout(timeout)); err != nil {
@@ -107,8 +136,9 @@ func (h *Handler) Deny(t testing.TB, timeout ...time.Duration) {
 	}
 }
 
-// GrantAll grants sequential permission dialogs until none remain. At most
-// five dialogs are granted to guard against an unexpected infinite sequence.
+// GrantAll grants sequential permission dialogs until none appear during a
+// bounded transition window. At most five dialogs are granted to guard against
+// an unexpected infinite sequence.
 func (h *Handler) GrantAll(t testing.TB, timeout ...time.Duration) {
 	t.Helper()
 	if err := h.grantAll(resolveTimeout(timeout)); err != nil {
@@ -131,30 +161,42 @@ func (h *Handler) deny(timeout time.Duration) error {
 	return h.tapFirst(denyButtonChoices, timeout)
 }
 
+func (h *Handler) grantSelected(timeout time.Duration) error {
+	return h.tapFirst(selectedButtonChoices, timeout)
+}
+
 func (h *Handler) grantAll(timeout time.Duration) error {
 	if _, err := h.interactionUI(); err != nil {
 		return err
 	}
 
-	for granted := 0; granted < maxSequentialPermissionOps; granted++ {
-		visible, err := h.permissionDialogVisibleWithRetry(timeout, granted == 0)
-		if err != nil {
-			return fmt.Errorf("check for permission dialog %d: %w", granted+1, err)
+	sequenceDeadline := h.nowTime().Add(timeout)
+	visible, err := h.permissionDialogVisibleWithRetry(timeout, true)
+	if err != nil {
+		return fmt.Errorf("check for permission dialog 1: %w", err)
+	}
+	for granted := 0; visible && granted < maxSequentialPermissionOps; granted++ {
+		remaining := sequenceDeadline.Sub(h.nowTime())
+		if remaining < 0 {
+			remaining = 0
 		}
-		if !visible {
-			return nil
-		}
-
-		if err := h.grant(timeout); err != nil {
+		if err := h.grant(remaining); err != nil {
 			return fmt.Errorf("grant permission dialog %d: %w", granted+1, err)
 		}
-		h.sleepFor(permissionTransitionDelay)
+
+		transitionTimeout := sequenceDeadline.Sub(h.nowTime())
+		if transitionTimeout < 0 {
+			transitionTimeout = 0
+		}
+		if transitionTimeout > permissionTransitionWindow {
+			transitionTimeout = permissionTransitionWindow
+		}
+		visible, err = h.permissionDialogVisibleWithRetry(transitionTimeout, true)
+		if err != nil {
+			return fmt.Errorf("check for permission dialog %d: %w", granted+2, err)
+		}
 	}
 
-	visible, err := h.permissionDialogVisibleWithRetry(timeout, false)
-	if err != nil {
-		return fmt.Errorf("check for permission dialog after %d grants: %w", maxSequentialPermissionOps, err)
-	}
 	if visible {
 		return fmt.Errorf("maximum of %d sequential permission grants reached and another dialog is still visible", maxSequentialPermissionOps)
 	}
@@ -167,7 +209,8 @@ func (h *Handler) permissionDialogVisible() (bool, error) {
 		return false, err
 	}
 
-	elements, err := driver.Dump()
+	deadline := h.nowTime().Add(defaultTimeout)
+	elements, err := h.dumpUntil(driver, deadline)
 	if err != nil {
 		return false, fmt.Errorf("dump UI hierarchy: %w", err)
 	}
@@ -186,7 +229,7 @@ func (h *Handler) permissionDialogVisibleWithRetry(timeout time.Duration, waitFo
 
 	deadline := h.nowTime().Add(timeout)
 	for {
-		elements, dumpErr := driver.Dump()
+		elements, dumpErr := h.dumpUntil(driver, deadline)
 		if dumpErr == nil {
 			if isPermissionDialog(elements) {
 				return true, nil
@@ -210,6 +253,9 @@ func isPermissionDialog(elements []ui.Element) bool {
 	if _, _, ok := findButton(elements, grantButtonChoices); ok {
 		return true
 	}
+	if _, _, ok := findButton(elements, selectedButtonChoices); ok {
+		return true
+	}
 	_, _, ok := findButton(elements, denyButtonChoices)
 	return ok
 }
@@ -224,14 +270,14 @@ func (h *Handler) tapFirst(choices []buttonChoice, timeout time.Duration) error 
 	}
 
 	deadline := h.nowTime().Add(timeout)
-	lastErr := errors.New("no matching controller-owned button found")
+	var lastErr error
 	for {
-		elements, dumpErr := driver.Dump()
+		elements, dumpErr := h.dumpUntil(driver, deadline)
 		if dumpErr != nil {
 			lastErr = fmt.Errorf("dump UI hierarchy: %w", dumpErr)
 		} else if element, description, ok := findButton(elements, choices); ok {
 			x, y := element.Bounds.CenterX(), element.Bounds.CenterY()
-			if tapErr := driver.Tap(x, y); tapErr == nil {
+			if tapErr := h.tapUntil(driver, deadline, x, y); tapErr == nil {
 				return nil
 			} else {
 				lastErr = fmt.Errorf("tap %s at (%d,%d): %w", description, x, y, tapErr)
@@ -370,6 +416,28 @@ func (h *Handler) waitToRetry(deadline time.Time) bool {
 	}
 	h.sleepFor(delay)
 	return true
+}
+
+func (h *Handler) dumpUntil(driver permissionUI, deadline time.Time) ([]ui.Element, error) {
+	ctx, cancel := h.contextUntil(deadline)
+	defer cancel()
+	return driver.DumpContext(ctx)
+}
+
+func (h *Handler) tapUntil(driver permissionUI, deadline time.Time, x, y int) error {
+	ctx, cancel := h.contextUntil(deadline)
+	defer cancel()
+	return driver.TapContext(ctx, x, y)
+}
+
+func (h *Handler) contextUntil(deadline time.Time) (context.Context, context.CancelFunc) {
+	remaining := deadline.Sub(h.nowTime())
+	if remaining <= 0 {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		return ctx, cancel
+	}
+	return context.WithTimeout(context.Background(), remaining)
 }
 
 func resolveTimeout(timeout []time.Duration) time.Duration {

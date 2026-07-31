@@ -120,6 +120,8 @@ func TestDevices_ParseOutput(t *testing.T) {
 echo "List of devices attached"
 echo "emulator-5554	device"
 echo "emulator-5556	device"
+echo "physical-1	offline"
+echo "physical-2	unauthorized usb:1-2"
 echo ""
 `
 	if err := os.WriteFile(fakeADB, []byte(script), 0o755); err != nil {
@@ -130,11 +132,12 @@ echo ""
 	if err != nil {
 		t.Fatalf("Devices() error: %v", err)
 	}
-	if len(serials) != 2 {
-		t.Fatalf("Devices() returned %d serials, want 2", len(serials))
+	if len(serials) != 4 {
+		t.Fatalf("Devices() returned %d serials, want 4", len(serials))
 	}
-	if serials[0] != "emulator-5554" || serials[1] != "emulator-5556" {
-		t.Errorf("Devices() = %v, want [emulator-5554 emulator-5556]", serials)
+	want := []string{"emulator-5554", "emulator-5556", "physical-1", "physical-2"}
+	if !equalStrings(serials, want) {
+		t.Errorf("Devices() = %v, want %v", serials, want)
 	}
 }
 

@@ -22,7 +22,7 @@ import (
 )
 
 const (
-	defaultGPU         = "swiftshader_indirect"
+	defaultGPU         = "auto"
 	defaultBootTimeout = 120 * time.Second
 	defaultAppTimeout  = 30 * time.Second
 	defaultCDPPort     = 9222
@@ -43,7 +43,7 @@ type Config struct {
 	AppActivity string
 	// Headless starts an owned AVD without a window.
 	Headless bool
-	// GPU selects the GPU mode for an owned AVD. Zero uses swiftshader_indirect.
+	// GPU selects the GPU mode for an owned AVD. Zero uses auto.
 	GPU string
 	// NoAudio disables audio for an owned AVD.
 	NoAudio bool
@@ -51,8 +51,9 @@ type Config struct {
 	WipeData bool
 	// BootTimeout bounds AVD boot or attached-device readiness. Zero means 120 seconds.
 	BootTimeout time.Duration
-	// AppTimeout bounds APK inspection, install, launch, and CDP readiness operations.
-	// Zero means 30 seconds.
+	// AppTimeout bounds each app operation, including APK inspection, install,
+	// activity resolution, launch, restart, and cleanup. Initial launch and CDP
+	// readiness share one budget. Zero means 30 seconds.
 	AppTimeout time.Duration
 	// CDPPort is the host TCP port used for WebView forwarding. Zero means 9222.
 	CDPPort int
@@ -88,8 +89,11 @@ type Device struct {
 // Setup validates cfg, prepares the requested device, installs and launches
 // the APK, and connects the WebView CDP client. Setup is intended for TestMain
 // and panics after cleaning up any partially acquired resources on failure.
+//
+//nolint:gocritic // Config is a public value-style options struct by design.
 func Setup(cfg Config) *Device {
-	device, err := setupWithDependencies(cfg, productionTestkitDependencies())
+	deps := productionTestkitDependencies()
+	device, err := setupWithDependencies(cfg, &deps)
 	if err != nil {
 		panic(err)
 	}
@@ -192,7 +196,8 @@ func productionTestkitDependencies() testkitDependencies {
 	}
 }
 
-func setupWithDependencies(cfg Config, deps testkitDependencies) (*Device, error) {
+//nolint:gocritic // Config is normalized as an immutable value at the boundary.
+func setupWithDependencies(cfg Config, deps *testkitDependencies) (*Device, error) {
 	cfg, err := normalizeConfig(cfg)
 	if err != nil {
 		return nil, err
@@ -227,7 +232,7 @@ func setupWithDependencies(cfg Config, deps testkitDependencies) (*Device, error
 		cfg.AppActivity = component
 	}
 
-	device := &Device{Config: cfg, deps: deps}
+	device := &Device{Config: cfg, deps: *deps}
 	fail := func(setupErr error) (*Device, error) {
 		cleanupErr := device.Teardown()
 		if cleanupErr != nil {
@@ -329,6 +334,7 @@ func setupWithDependencies(cfg Config, deps testkitDependencies) (*Device, error
 	return device, nil
 }
 
+//nolint:gocritic // Returning a normalized Config value keeps setup state isolated.
 func normalizeConfig(cfg Config) (Config, error) {
 	cfg.AVD = strings.TrimSpace(cfg.AVD)
 	cfg.Serial = strings.TrimSpace(cfg.Serial)
@@ -353,7 +359,7 @@ func normalizeConfig(cfg Config) (Config, error) {
 		return Config{}, fmt.Errorf("CDPPort must be between 1 and 65535, got %d", cfg.CDPPort)
 	}
 	if cfg.Serial != "" && (cfg.Headless || cfg.GPU != "" || cfg.NoAudio || cfg.WipeData) {
-		return Config{}, errors.New("Headless, GPU, NoAudio, and WipeData apply only when AVD is set")
+		return Config{}, errors.New("headless, GPU, NoAudio, and WipeData apply only when AVD is set")
 	}
 	if cfg.AppPackage != "" {
 		if err := validatePackageName(cfg.AppPackage); err != nil {
@@ -379,7 +385,10 @@ func normalizeConfig(cfg Config) (Config, error) {
 	return cfg, nil
 }
 
-func validateDependencies(deps testkitDependencies) error {
+func validateDependencies(deps *testkitDependencies) error {
+	if deps == nil {
+		return errors.New("testkit dependencies are nil")
+	}
 	if deps.validateAPK == nil || deps.inspectAPK == nil || deps.startEmulator == nil || deps.newADB == nil ||
 		deps.waitForDevice == nil || deps.waitForBoot == nil || deps.runADB == nil || deps.shellADB == nil ||
 		deps.newCDP == nil || deps.reconnectCDP == nil || deps.closeCDP == nil ||
@@ -405,6 +414,7 @@ func inspectAPK(ctx context.Context, apkPath string) (apkMetadata, error) {
 	if err != nil {
 		return apkMetadata{}, err
 	}
+	//nolint:gosec // aaptPath is resolved from explicit Android SDK configuration.
 	cmd := exec.CommandContext(ctx, aaptPath, "dump", "badging", apkPath)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -459,6 +469,7 @@ func findAAPT() (string, error) {
 				continue
 			}
 			candidatePath := filepath.Join(buildTools, entry.Name(), "aapt")
+			//nolint:gosec // Android SDK roots are explicit user configuration.
 			info, statErr := os.Stat(candidatePath)
 			if statErr == nil && info.Mode().IsRegular() && info.Mode().Perm()&0o111 != 0 {
 				candidates = append(candidates, candidate{path: candidatePath, version: entry.Name()})

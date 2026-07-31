@@ -414,7 +414,7 @@ func TestSetupAVDOrchestratesAndAppliesEffectiveConfig(t *testing.T) {
 	cfg.NoAudio = true
 	cfg.WipeData = true
 
-	device, err := setupWithDependencies(cfg, deps)
+	device, err := setupWithDependencies(cfg, &deps)
 	if err != nil {
 		t.Fatalf("setupWithDependencies() error: %v", err)
 	}
@@ -455,7 +455,7 @@ func TestSetupSerialAttachesWithoutOwningDevice(t *testing.T) {
 	}
 	cfg := Config{Serial: "physical-1", APK: testAPK}
 
-	device, err := setupWithDependencies(cfg, deps)
+	device, err := setupWithDependencies(cfg, &deps)
 	if err != nil {
 		t.Fatalf("setupWithDependencies() error: %v", err)
 	}
@@ -516,7 +516,7 @@ func TestSetupActivityPrecedence(t *testing.T) {
 			cfg.AppPackage = test.appPackage
 			cfg.AppActivity = test.configured
 
-			device, err := setupWithDependencies(cfg, deps)
+			device, err := setupWithDependencies(cfg, &deps)
 			if err != nil {
 				t.Fatalf("setupWithDependencies() error: %v", err)
 			}
@@ -538,7 +538,7 @@ func TestSetupValidatesAndInspectsBeforeAcquiringDevice(t *testing.T) {
 	t.Run("invalid config", func(t *testing.T) {
 		log := &eventLog{}
 		deps := fakeDependencies(log)
-		_, err := setupWithDependencies(Config{APK: testAPK}, deps)
+		_, err := setupWithDependencies(Config{APK: testAPK}, &deps)
 		if err == nil {
 			t.Fatal("setupWithDependencies() unexpectedly succeeded")
 		}
@@ -554,7 +554,7 @@ func TestSetupValidatesAndInspectsBeforeAcquiringDevice(t *testing.T) {
 			log.add("stat")
 			return errors.New("not a regular file")
 		}
-		_, err := setupWithDependencies(avdConfig(), deps)
+		_, err := setupWithDependencies(avdConfig(), &deps)
 		if err == nil || !strings.Contains(err.Error(), "not a regular file") {
 			t.Fatalf("setup error = %v", err)
 		}
@@ -570,7 +570,7 @@ func TestSetupValidatesAndInspectsBeforeAcquiringDevice(t *testing.T) {
 			log.add("inspect")
 			return apkMetadata{}, errors.New("bad APK")
 		}
-		_, err := setupWithDependencies(avdConfig(), deps)
+		_, err := setupWithDependencies(avdConfig(), &deps)
 		if err == nil || !strings.Contains(err.Error(), "bad APK") {
 			t.Fatalf("setup error = %v", err)
 		}
@@ -589,7 +589,7 @@ func TestSetupValidatesAndInspectsBeforeAcquiringDevice(t *testing.T) {
 		cfg := avdConfig()
 		cfg.AppPackage = testPackage
 		cfg.AppActivity = ".MainActivity"
-		device, err := setupWithDependencies(cfg, deps)
+		device, err := setupWithDependencies(cfg, &deps)
 		if err != nil {
 			t.Fatalf("setup error = %v", err)
 		}
@@ -628,7 +628,7 @@ func TestSetupFailureCleansEveryAcquiredResourceInOrder(t *testing.T) {
 		return errors.New("kill failed")
 	}
 
-	device, err := setupWithDependencies(avdConfig(), deps)
+	device, err := setupWithDependencies(avdConfig(), &deps)
 	if device != nil {
 		t.Fatalf("device = %+v, want nil", device)
 	}
@@ -661,7 +661,7 @@ func TestSetupCleansPartialEmulatorReturnedWithStartError(t *testing.T) {
 		return nil
 	}
 
-	_, err := setupWithDependencies(avdConfig(), deps)
+	_, err := setupWithDependencies(avdConfig(), &deps)
 	if err == nil || !strings.Contains(err.Error(), "boot failed") {
 		t.Fatalf("setup error = %v", err)
 	}
@@ -727,7 +727,7 @@ func TestSetupFailureCleanupMatchesAcquisitionStage(t *testing.T) {
 			log := &eventLog{}
 			deps := fakeDependencies(log)
 			test.configure(&deps, log)
-			_, err := setupWithDependencies(avdConfig(), deps)
+			_, err := setupWithDependencies(avdConfig(), &deps)
 			if err == nil {
 				t.Fatal("setupWithDependencies() unexpectedly succeeded")
 			}
@@ -751,7 +751,7 @@ func TestSerialSetupFailureNeverKillsAttachedDevice(t *testing.T) {
 	deps.runADB = func(context.Context, *adb.Client, ...string) (string, error) {
 		return "", errors.New("install failed")
 	}
-	_, err := setupWithDependencies(Config{Serial: "physical-1", APK: testAPK}, deps)
+	_, err := setupWithDependencies(Config{Serial: "physical-1", APK: testAPK}, &deps)
 	if err == nil {
 		t.Fatal("setupWithDependencies() unexpectedly succeeded")
 	}

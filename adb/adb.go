@@ -51,6 +51,9 @@ func (c *Client) RunContext(ctx context.Context, args ...string) (string, error)
 
 	cmdArgs := c.baseArgs()
 	cmdArgs = append(cmdArgs, args...)
+	// ADBPath is either SDK/PATH-resolved by New or explicitly supplied by the
+	// caller for dependency injection; arguments are not re-parsed by a host shell.
+	//nolint:gosec // Executing the configured adb binary is the purpose of Client.
 	cmd := exec.CommandContext(ctx, c.ADBPath, cmdArgs...)
 	out, err := cmd.CombinedOutput()
 	output := strings.TrimSpace(string(out))
@@ -152,13 +155,14 @@ func (c *Client) WaitForDeviceContext(ctx context.Context) error {
 	return nil
 }
 
-// Devices returns all connected device serials.
+// Devices returns the serial of every device listed by adb, including devices
+// that are currently offline or unauthorized.
 func Devices() ([]string, error) {
 	return DevicesContext(context.Background())
 }
 
-// DevicesContext returns all connected device serials, cancelling adb when ctx
-// is done.
+// DevicesContext returns every serial listed by adb, including offline and
+// unauthorized devices, and cancels adb when ctx is done.
 func DevicesContext(ctx context.Context) ([]string, error) {
 	adbPath, err := findADB()
 	if err != nil {
@@ -180,7 +184,7 @@ func devices(ctx context.Context, adbPath string) ([]string, error) {
 			continue
 		}
 		parts := strings.Fields(line)
-		if len(parts) >= 2 && parts[1] == "device" {
+		if len(parts) >= 2 {
 			serials = append(serials, parts[0])
 		}
 	}
@@ -201,6 +205,7 @@ func findADB() (string, error) {
 	for _, env := range []string{"ANDROID_HOME", "ANDROID_SDK_ROOT"} {
 		if root := os.Getenv(env); root != "" {
 			candidate := filepath.Join(root, "platform-tools", "adb")
+			//nolint:gosec // Android SDK roots are explicit user configuration.
 			if _, err := os.Stat(candidate); err == nil {
 				return candidate, nil
 			}

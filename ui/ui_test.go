@@ -1,10 +1,13 @@
 package ui
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/GyldendalDigital/go-adbtest/adb"
 )
@@ -56,15 +59,16 @@ if [ "$1" = "shell" ] && [ "$2" = "uiautomator dump /dev/tty" ]; then
     printf '%s\n' 'UI hierchary dumped to: /dev/tty'
     exit 0
 fi
-if [ "$1" = "shell" ] && [ "$2" = "uiautomator dump /sdcard/ui.xml" ]; then
-    exit 0
+if [ "$1" = "shell" ]; then
+    case "$2" in
+        "rm -f /data/local/tmp/go-adbtest-ui-"*.xml) exit 0 ;;
+        "uiautomator dump /data/local/tmp/go-adbtest-ui-"*.xml) exit 0 ;;
+    esac
 fi
-if [ "$1" = "pull" ] && [ "$2" = "/sdcard/ui.xml" ]; then
-    cp "$FAKE_ADB_XML" "$3"
-    exit 0
-fi
-if [ "$1" = "shell" ] && [ "$2" = "rm -f /sdcard/ui.xml" ]; then
-    exit 0
+if [ "$1" = "pull" ]; then
+    case "$2" in
+        /data/local/tmp/go-adbtest-ui-*.xml) cp "$FAKE_ADB_XML" "$3"; exit 0 ;;
+    esac
 fi
 exit 92
 `)
@@ -82,13 +86,13 @@ exit 92
 		t.Fatal(err)
 	}
 	lines := nonEmptyLines(string(logData))
-	if len(lines) != 4 {
-		t.Fatalf("adb calls = %q, want fast dump, fallback dump, pull, cleanup", lines)
+	if len(lines) != 5 {
+		t.Fatalf("adb calls = %q, want fast dump, pre-clean, fallback dump, pull, cleanup", lines)
 	}
-	if !strings.HasPrefix(lines[2], "pull|/sdcard/ui.xml|") {
-		t.Fatalf("third adb call = %q, want pull", lines[2])
+	if !strings.HasPrefix(lines[3], "pull|/data/local/tmp/go-adbtest-ui-") {
+		t.Fatalf("fourth adb call = %q, want unique-path pull", lines[3])
 	}
-	localPath := strings.TrimPrefix(lines[2], "pull|/sdcard/ui.xml|")
+	localPath := lines[3][strings.LastIndex(lines[3], "|")+1:]
 	if _, err := os.Stat(localPath); !os.IsNotExist(err) {
 		t.Fatalf("temporary pulled file still exists at %q (stat error: %v)", localPath, err)
 	}
@@ -106,15 +110,16 @@ if [ "$1" = "shell" ] && [ "$2" = "uiautomator dump /dev/tty" ]; then
     printf '%s\n' 'fast path unavailable'
     exit 0
 fi
-if [ "$1" = "shell" ] && [ "$2" = "uiautomator dump /sdcard/ui.xml" ]; then
-    exit 0
+if [ "$1" = "shell" ]; then
+    case "$2" in
+        "rm -f /data/local/tmp/go-adbtest-ui-"*.xml) exit 0 ;;
+        "uiautomator dump /data/local/tmp/go-adbtest-ui-"*.xml) exit 0 ;;
+    esac
 fi
-if [ "$1" = "pull" ] && [ "$2" = "/sdcard/ui.xml" ]; then
-    cp "$FAKE_ADB_XML" "$3"
-    exit 0
-fi
-if [ "$1" = "shell" ] && [ "$2" = "rm -f /sdcard/ui.xml" ]; then
-    exit 0
+if [ "$1" = "pull" ]; then
+    case "$2" in
+        /data/local/tmp/go-adbtest-ui-*.xml) cp "$FAKE_ADB_XML" "$3"; exit 0 ;;
+    esac
 fi
 exit 93
 `)
@@ -128,6 +133,61 @@ exit 93
 	}
 	if !strings.Contains(err.Error(), "invalid bounds") {
 		t.Fatalf("Dump() error = %v, want invalid bounds", err)
+	}
+}
+
+func TestDumpContextHonorsDeadline(t *testing.T) {
+	client := fakeADBClient(t, `
+while :; do :; done
+`)
+	interactor := NewInteractor(client)
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	started := time.Now()
+	_, err := interactor.DumpContext(ctx)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("DumpContext() error = %v, want context deadline", err)
+	}
+	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+		t.Fatalf("DumpContext() took %v with a 50ms deadline", elapsed)
+	}
+}
+
+func TestTapContextHonorsDeadline(t *testing.T) {
+	client := fakeADBClient(t, `
+while :; do :; done
+`)
+	interactor := NewInteractor(client)
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	started := time.Now()
+	err := interactor.TapContext(ctx, 10, 20)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("TapContext() error = %v, want context deadline", err)
+	}
+	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+		t.Fatalf("TapContext() took %v with a 50ms deadline", elapsed)
+	}
+}
+
+func TestWaitForElementUsesOneDeadline(t *testing.T) {
+	client := fakeADBClient(t, `
+exit 7
+`)
+	interactor := NewInteractor(client)
+
+	started := time.Now()
+	_, err := interactor.waitForElement("never visible", 75*time.Millisecond)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("waitForElement() error = %v, want context deadline", err)
+	}
+	if !strings.Contains(err.Error(), "last dump error") {
+		t.Fatalf("waitForElement() error = %v, want last dump error", err)
+	}
+	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+		t.Fatalf("waitForElement() took %v with a 75ms timeout", elapsed)
 	}
 }
 

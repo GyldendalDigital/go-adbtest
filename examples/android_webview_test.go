@@ -140,7 +140,7 @@ func TestExampleConfigurationModes(t *testing.T) {
 				"ADBTEST_HEADLESS":  "true",
 				"ADBTEST_NO_AUDIO":  "true",
 				"ADBTEST_WIPE_DATA": "true",
-				"ADBTEST_GPU":       "swiftshader_indirect",
+				"ADBTEST_GPU":       "auto",
 			}),
 			assert: func(t *testing.T, config adbtest.Config) {
 				t.Helper()

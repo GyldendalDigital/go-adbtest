@@ -17,7 +17,7 @@ func TestBuildArgs_AllOptions(t *testing.T) {
 	cfg := Config{
 		AVD:        "Pixel_7",
 		Headless:   true,
-		GPU:        "swiftshader_indirect",
+		GPU:        "software",
 		NoAudio:    true,
 		WipeData:   true,
 		NoSnapshot: true,
@@ -26,15 +26,15 @@ func TestBuildArgs_AllOptions(t *testing.T) {
 	args := buildArgs(cfg)
 
 	expected := map[string]bool{
-		"-avd":                 true,
-		"Pixel_7":              true,
-		"-no-boot-anim":        true,
-		"-no-window":           true,
-		"-gpu":                 true,
-		"swiftshader_indirect": true,
-		"-no-audio":            true,
-		"-wipe-data":           true,
-		"-no-snapshot":         true,
+		"-avd":          true,
+		"Pixel_7":       true,
+		"-no-boot-anim": true,
+		"-no-window":    true,
+		"-gpu":          true,
+		"software":      true,
+		"-no-audio":     true,
+		"-wipe-data":    true,
+		"-no-snapshot":  true,
 	}
 
 	for _, arg := range args {
@@ -277,7 +277,7 @@ printf '%s\n' "$@" >> "$ADBTEST_ARGS_FILE"
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start fake emulator: %v", err)
 	}
-	instance := newInstance(cmd)
+	instance := newInstance(cmd, false)
 	instance.Serial = "emulator-5554"
 	instance.ADB = &adb.Client{Serial: instance.Serial, ADBPath: fakeADB}
 	instance.shutdownTimeout = 20 * time.Millisecond
@@ -321,7 +321,7 @@ func TestInstance_KillFallsBackImmediatelyWhenADBCommandFails(t *testing.T) {
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start fake emulator: %v", err)
 	}
-	instance := newInstance(cmd)
+	instance := newInstance(cmd, false)
 	instance.Serial = "emulator-5554"
 	instance.ADB = &adb.Client{Serial: instance.Serial, ADBPath: fakeADB}
 	instance.shutdownTimeout = 5 * time.Second

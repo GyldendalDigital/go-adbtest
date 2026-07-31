@@ -28,7 +28,7 @@ type Config struct {
 	AVD string
 	// Headless adds the emulator's -no-window option.
 	Headless bool
-	// GPU selects the emulator GPU mode, such as "swiftshader_indirect" or "host".
+	// GPU selects the emulator GPU mode, such as "auto", "host", or "software".
 	GPU string
 	// NoAudio adds the emulator's -no-audio option.
 	NoAudio bool
@@ -49,13 +49,14 @@ type Instance struct {
 	// ADB is a client pinned to Serial.
 	ADB *adb.Client
 
-	cmd             *exec.Cmd
-	done            chan struct{}
-	stateMu         sync.Mutex
-	waitErr         error
-	killOnce        sync.Once
-	killErr         error
-	shutdownTimeout time.Duration
+	cmd              *exec.Cmd
+	done             chan struct{}
+	stateMu          sync.Mutex
+	waitErr          error
+	killOnce         sync.Once
+	killErr          error
+	shutdownTimeout  time.Duration
+	ownsProcessGroup bool
 }
 
 // Start boots an emulator with the given config. Blocks until boot_completed=1.
@@ -124,11 +125,12 @@ func startWithDependencies(cfg Config, deps startDependencies) (*Instance, error
 	cmd := deps.command(emulatorPath, args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+	ownsProcessGroup := prepareEmulatorProcess(cmd)
 
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("start emulator: %w", err)
 	}
-	inst := newInstance(cmd)
+	inst := newInstance(cmd, ownsProcessGroup)
 	processCtx, stopProcessMonitor := context.WithCancel(ctx)
 	defer stopProcessMonitor()
 	go func() {
@@ -158,12 +160,13 @@ func startWithDependencies(cfg Config, deps startDependencies) (*Instance, error
 	return inst, nil
 }
 
-func newInstance(cmd *exec.Cmd) *Instance {
+func newInstance(cmd *exec.Cmd, ownsProcessGroup bool) *Instance {
 	instance := &Instance{
-		PID:             cmd.Process.Pid,
-		cmd:             cmd,
-		done:            make(chan struct{}),
-		shutdownTimeout: defaultShutdownTimeout,
+		PID:              cmd.Process.Pid,
+		cmd:              cmd,
+		done:             make(chan struct{}),
+		shutdownTimeout:  defaultShutdownTimeout,
+		ownsProcessGroup: ownsProcessGroup,
 	}
 	go func() {
 		err := cmd.Wait()
@@ -430,14 +433,18 @@ func (i *Instance) terminateAndWait() error {
 	if i == nil || i.cmd == nil || i.cmd.Process == nil {
 		return nil
 	}
-	if !i.IsRunning() {
+	running := i.IsRunning()
+	if !running && !i.ownsProcessGroup {
 		if i.done != nil {
 			<-i.done
 		}
 		return nil
 	}
 
-	killErr := i.cmd.Process.Kill()
+	// A Unix emulator is launched as a process-group leader. Kill the whole
+	// group even when the leader has already exited: a launcher can otherwise
+	// leave its emulator descendant running after startup fails.
+	killErr := terminateEmulatorProcess(i.cmd.Process, i.ownsProcessGroup)
 	if killErr != nil && !errors.Is(killErr, os.ErrProcessDone) {
 		return fmt.Errorf("kill emulator process: %w", killErr)
 	}
@@ -457,6 +464,7 @@ func findEmulator() (string, error) {
 	for _, env := range []string{"ANDROID_HOME", "ANDROID_SDK_ROOT"} {
 		if root := os.Getenv(env); root != "" {
 			candidate := filepath.Join(root, "emulator", "emulator")
+			//nolint:gosec // Android SDK roots are explicit user configuration.
 			if _, err := os.Stat(candidate); err == nil {
 				return candidate, nil
 			}

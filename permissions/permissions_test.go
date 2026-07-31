@@ -1,6 +1,7 @@
 package permissions
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -16,14 +17,25 @@ type stubPermissionUI struct {
 	tapFn  func(int, int) error
 }
 
-func (s *stubPermissionUI) Dump() ([]ui.Element, error) {
+type blockingPermissionUI struct{}
+
+func (blockingPermissionUI) DumpContext(ctx context.Context) ([]ui.Element, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func (blockingPermissionUI) TapContext(context.Context, int, int) error {
+	return nil
+}
+
+func (s *stubPermissionUI) DumpContext(context.Context) ([]ui.Element, error) {
 	if s.dumpFn == nil {
 		return nil, nil
 	}
 	return s.dumpFn()
 }
 
-func (s *stubPermissionUI) Tap(x, y int) error {
+func (s *stubPermissionUI) TapContext(_ context.Context, x, y int) error {
 	if s.tapFn == nil {
 		return nil
 	}
@@ -125,6 +137,13 @@ func TestIsPermissionDialogRequiresControllerOwnedAction(t *testing.T) {
 			},
 			want: true,
 		},
+		{
+			name: "selected media resource ID is a permission dialog",
+			elements: []ui.Element{
+				element(testControllerPackage, "Fotos auswählen", "com.android.permissioncontroller:id/permission_allow_selected_button", true, 0),
+			},
+			want: true,
+		},
 	}
 
 	for _, test := range tests {
@@ -137,6 +156,20 @@ func TestIsPermissionDialogRequiresControllerOwnedAction(t *testing.T) {
 }
 
 func TestFindButtonSelection(t *testing.T) {
+	t.Run("full media access is preferred", func(t *testing.T) {
+		elements := []ui.Element{
+			element(testControllerPackage, "While using the app", "", true, 10),
+			element(testControllerPackage, "Tout autoriser", "com.android.permissioncontroller:id/permission_allow_all_button", true, 30),
+		}
+		got, _, ok := findButton(elements, grantButtonChoices)
+		if !ok {
+			t.Fatal("findButton() did not find a grant button")
+		}
+		if got.Bounds.CenterX() != 40 {
+			t.Fatalf("selected x = %d, want full-access button x = 40", got.Bounds.CenterX())
+		}
+	})
+
 	t.Run("grant preference beats hierarchy order", func(t *testing.T) {
 		elements := []ui.Element{
 			element(testControllerPackage, "Only this time", "", true, 10),
@@ -223,6 +256,11 @@ func TestGrantTapsSupportedVariants(t *testing.T) {
 			text:       "Autoriser",
 			resourceID: "com.android.permissioncontroller:id/permission_allow_button",
 		},
+		{
+			name:       "Android 14 full photo access",
+			text:       "Alle zulassen",
+			resourceID: "com.android.permissioncontroller:id/permission_allow_all_button",
+		},
 	}
 
 	for _, test := range tests {
@@ -248,6 +286,28 @@ func TestGrantTapsSupportedVariants(t *testing.T) {
 	}
 }
 
+func TestGrantSelectedTapsLimitedMediaChoice(t *testing.T) {
+	var taps [][2]int
+	driver := &stubPermissionUI{
+		dumpFn: func() ([]ui.Element, error) {
+			return []ui.Element{
+				element(testControllerPackage, "Fotos auswählen", "com.android.permissioncontroller:id/permission_allow_selected_button", true, 20),
+			}, nil
+		},
+		tapFn: func(x, y int) error {
+			taps = append(taps, [2]int{x, y})
+			return nil
+		},
+	}
+
+	if err := handlerWithUI(driver).grantSelected(time.Second); err != nil {
+		t.Fatalf("grantSelected() error: %v", err)
+	}
+	if len(taps) != 1 || taps[0] != [2]int{30, 110} {
+		t.Fatalf("taps = %v, want [(30,110)]", taps)
+	}
+}
+
 func TestDenyTapsSupportedVariants(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -267,6 +327,11 @@ func TestDenyTapsSupportedVariants(t *testing.T) {
 			name:       "deny and do not ask again resource ID",
 			text:       "Ne plus demander",
 			resourceID: "com.android.permissioncontroller:id/permission_deny_and_dont_ask_again_button",
+		},
+		{
+			name:       "deny more selected media resource ID",
+			text:       "Nicht mehr zulassen",
+			resourceID: "com.android.permissioncontroller:id/permission_dont_allow_more_selected_button",
 		},
 	}
 
@@ -337,6 +402,17 @@ func TestGrantTimeoutRetainsDumpError(t *testing.T) {
 	}
 }
 
+func TestGrantTimeoutBoundsBlockedDump(t *testing.T) {
+	started := time.Now()
+	err := handlerWithUI(blockingPermissionUI{}).grant(50 * time.Millisecond)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("grant() error = %v, want context deadline", err)
+	}
+	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+		t.Fatalf("grant() took %v with a 50ms timeout", elapsed)
+	}
+}
+
 func TestGrantTimeoutRetainsTapError(t *testing.T) {
 	clock := newFakeClock()
 	tapCalls := 0
@@ -400,6 +476,7 @@ func TestIsVisibleHandlesDumpError(t *testing.T) {
 }
 
 func TestGrantAllDrainsSequentialDialogs(t *testing.T) {
+	clock := newFakeClock()
 	dialogs := [][]ui.Element{
 		{element(testControllerPackage, "While using the app", "", true, 0)},
 		{element(testControllerPackage, "Only this time", "", true, 20)},
@@ -408,7 +485,6 @@ func TestGrantAllDrainsSequentialDialogs(t *testing.T) {
 	}
 	current := 0
 	var taps [][2]int
-	var sleeps []time.Duration
 	driver := &stubPermissionUI{
 		dumpFn: func() ([]ui.Element, error) {
 			return dialogs[current], nil
@@ -419,12 +495,7 @@ func TestGrantAllDrainsSequentialDialogs(t *testing.T) {
 			return nil
 		},
 	}
-	handler := &Handler{
-		uiOverride: driver,
-		sleepFn: func(duration time.Duration) {
-			sleeps = append(sleeps, duration)
-		},
-	}
+	handler := handlerWithClock(driver, clock)
 
 	if err := handler.grantAll(time.Second); err != nil {
 		t.Fatalf("grantAll() error: %v", err)
@@ -438,12 +509,12 @@ func TestGrantAllDrainsSequentialDialogs(t *testing.T) {
 			t.Fatalf("tap %d = %v, want %v", i, taps[i], wantTaps[i])
 		}
 	}
-	if len(sleeps) != 3 {
-		t.Fatalf("transition sleeps = %v, want 3", sleeps)
+	if len(clock.sleeps) != 2 {
+		t.Fatalf("transition polls = %v, want two polls through the remaining timeout", clock.sleeps)
 	}
-	for _, duration := range sleeps {
-		if duration != permissionTransitionDelay {
-			t.Fatalf("transition sleep = %v, want %v", duration, permissionTransitionDelay)
+	for _, duration := range clock.sleeps {
+		if duration != permissionPollInterval {
+			t.Fatalf("transition poll = %v, want %v", duration, permissionPollInterval)
 		}
 	}
 }
@@ -506,8 +577,13 @@ func TestGrantAllWaitsForInitialDialog(t *testing.T) {
 	if tapCalls != 1 {
 		t.Fatalf("Tap called %d times, want 1", tapCalls)
 	}
-	if len(clock.sleeps) != 2 || clock.sleeps[0] != permissionPollInterval || clock.sleeps[1] != permissionTransitionDelay {
-		t.Fatalf("sleeps = %v, want [%v %v]", clock.sleeps, permissionPollInterval, permissionTransitionDelay)
+	if len(clock.sleeps) != 4 {
+		t.Fatalf("sleeps = %v, want initial and bounded transition polling", clock.sleeps)
+	}
+	for _, duration := range clock.sleeps {
+		if duration != permissionPollInterval {
+			t.Fatalf("poll duration = %v, want %v", duration, permissionPollInterval)
+		}
 	}
 }
 
@@ -540,8 +616,48 @@ func TestGrantAllRetriesTransientVisibilityError(t *testing.T) {
 	if tapCalls != 1 {
 		t.Fatalf("Tap called %d times, want 1", tapCalls)
 	}
-	if len(clock.sleeps) != 2 || clock.sleeps[0] != permissionPollInterval || clock.sleeps[1] != permissionTransitionDelay {
-		t.Fatalf("sleeps = %v, want [%v %v]", clock.sleeps, permissionPollInterval, permissionTransitionDelay)
+	if len(clock.sleeps) != 4 {
+		t.Fatalf("sleeps = %v, want retry and bounded transition polling", clock.sleeps)
+	}
+	for _, duration := range clock.sleeps {
+		if duration != permissionPollInterval {
+			t.Fatalf("poll duration = %v, want %v", duration, permissionPollInterval)
+		}
+	}
+}
+
+func TestGrantAllWaitsForDelayedNextDialog(t *testing.T) {
+	clock := newFakeClock()
+	granted := 0
+	var taps [][2]int
+	driver := &stubPermissionUI{
+		dumpFn: func() ([]ui.Element, error) {
+			switch {
+			case granted == 0:
+				return []ui.Element{element(testControllerPackage, "Allow", "", true, 0)}, nil
+			case granted == 1 && clock.Now().Before(time.Unix(1, 0).Add(1500*time.Millisecond)):
+				return nil, nil
+			case granted == 1:
+				return []ui.Element{element(testControllerPackage, "Only this time", "", true, 20)}, nil
+			default:
+				return nil, nil
+			}
+		},
+		tapFn: func(x, y int) error {
+			taps = append(taps, [2]int{x, y})
+			granted++
+			return nil
+		},
+	}
+
+	if err := handlerWithClock(driver, clock).grantAll(5 * time.Second); err != nil {
+		t.Fatalf("grantAll() error: %v", err)
+	}
+	if len(taps) != 2 {
+		t.Fatalf("taps = %v, want both the immediate and delayed permission dialogs", taps)
+	}
+	if clock.Now().Before(time.Unix(1, 0).Add(1500 * time.Millisecond)) {
+		t.Fatalf("grantAll returned before delayed dialog appeared at fake time %v", clock.Now())
 	}
 }
 

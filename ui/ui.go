@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -33,27 +34,36 @@ func NewInteractor(adbClient *adb.Client) *Interactor {
 	}
 }
 
-// TapOnText finds an element by text and taps its center. Polls with retry.
+// TapOnText finds an element by case-sensitive text substring and taps its
+// center. It polls until the first positive timeout override, or Timeout.
 func (u *Interactor) TapOnText(t testing.TB, text string, timeout ...time.Duration) {
 	t.Helper()
 	to := u.resolveTimeout(timeout)
-	el, err := u.waitForElement(text, to)
+	ctx, cancel := context.WithTimeout(context.Background(), to)
+	defer cancel()
+	el, err := u.waitForElementContext(ctx, text, to)
 	if err != nil {
 		t.Fatalf("TapOnText(%q): %v", text, err)
 	}
-	u.tapElement(t, el)
+	u.tapElementContext(t, ctx, &el)
 }
 
-// LongPressOnText finds an element by text and long-presses (swipe-in-place 1.5s).
+// LongPressOnText finds an element by case-sensitive text substring and
+// long-presses it with a 1.5-second swipe-in-place gesture.
 func (u *Interactor) LongPressOnText(t testing.TB, text string, timeout ...time.Duration) {
 	t.Helper()
 	to := u.resolveTimeout(timeout)
-	el, err := u.waitForElement(text, to)
+	ctx, cancel := context.WithTimeout(context.Background(), to)
+	defer cancel()
+	el, err := u.waitForElementContext(ctx, text, to)
 	if err != nil {
 		t.Fatalf("LongPressOnText(%q): %v", text, err)
 	}
 	cx, cy := el.Bounds.CenterX(), el.Bounds.CenterY()
-	_, err = u.ADB.Shell(fmt.Sprintf("input swipe %d %d %d %d 1500", cx, cy, cx, cy))
+	client, err := u.adbClient()
+	if err == nil {
+		_, err = client.ShellContext(ctx, fmt.Sprintf("input swipe %d %d %d %d 1500", cx, cy, cx, cy))
+	}
 	if err != nil {
 		t.Fatalf("LongPressOnText(%q): input swipe: %v", text, err)
 	}
@@ -63,23 +73,29 @@ func (u *Interactor) LongPressOnText(t testing.TB, text string, timeout ...time.
 func (u *Interactor) TapOnID(t testing.TB, resourceID string, timeout ...time.Duration) {
 	t.Helper()
 	to := u.resolveTimeout(timeout)
-	el, err := u.waitForElementByID(resourceID, to)
+	ctx, cancel := context.WithTimeout(context.Background(), to)
+	defer cancel()
+	el, err := u.waitForElementByIDContext(ctx, resourceID, to)
 	if err != nil {
 		t.Fatalf("TapOnID(%q): %v", resourceID, err)
 	}
-	u.tapElement(t, el)
+	u.tapElementContext(t, ctx, &el)
 }
 
-// WaitForText polls until an element with the given text appears.
+// WaitForText polls until an element containing the case-sensitive text
+// substring appears.
 func (u *Interactor) WaitForText(t testing.TB, text string, timeout ...time.Duration) {
 	t.Helper()
 	to := u.resolveTimeout(timeout)
-	if _, err := u.waitForElement(text, to); err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), to)
+	defer cancel()
+	if _, err := u.waitForElementContext(ctx, text, to); err != nil {
 		t.Fatalf("WaitForText(%q): %v", text, err)
 	}
 }
 
-// AssertVisible asserts that text is currently visible in the UI hierarchy.
+// AssertVisible asserts that a case-sensitive text substring is currently
+// visible in the UI hierarchy.
 func (u *Interactor) AssertVisible(t testing.TB, text string) {
 	t.Helper()
 	elements, err := u.Dump()
@@ -91,7 +107,8 @@ func (u *Interactor) AssertVisible(t testing.TB, text string) {
 	}
 }
 
-// AssertGone asserts that text is NOT visible in the UI hierarchy.
+// AssertGone asserts that a case-sensitive text substring is not currently
+// visible in the UI hierarchy.
 func (u *Interactor) AssertGone(t testing.TB, text string) {
 	t.Helper()
 	elements, err := u.Dump()
@@ -105,8 +122,27 @@ func (u *Interactor) AssertGone(t testing.TB, text string) {
 
 // Dump returns the current UI hierarchy as parsed Elements.
 func (u *Interactor) Dump() ([]Element, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), u.operationTimeout())
+	defer cancel()
+	return u.DumpContext(ctx)
+}
+
+// DumpContext returns the current UI hierarchy while bounding every ADB
+// command, including fallback pulling and remote cleanup, by ctx.
+func (u *Interactor) DumpContext(ctx context.Context) ([]Element, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("dump UI hierarchy: nil context")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("dump UI hierarchy: %w", err)
+	}
+	client, err := u.adbClient()
+	if err != nil {
+		return nil, err
+	}
+
 	// Try fast path: dump to stdout via /dev/tty
-	out, err := u.ADB.Shell("uiautomator dump /dev/tty")
+	out, err := client.ShellContext(ctx, "uiautomator dump /dev/tty")
 	var fastPathErr error
 	if err == nil {
 		xmlData, extractErr := hierarchyXML(out)
@@ -123,15 +159,8 @@ func (u *Interactor) Dump() ([]Element, error) {
 		fastPathErr = err
 	}
 
-	// Fallback: dump to a device file, pull it locally, and parse it there.
-	const remotePath = "/sdcard/ui.xml"
-	if _, err := u.ADB.Shell("uiautomator dump /sdcard/ui.xml"); err != nil {
-		return nil, fmt.Errorf("uiautomator fallback dump: %w (fast path: %v)", err, fastPathErr)
-	}
-	defer func() {
-		_, _ = u.ADB.Shell("rm -f " + remotePath)
-	}()
-
+	// Fallback: use one unique device file so concurrent or failed dumps cannot
+	// consume an earlier hierarchy.
 	tmpDir, err := os.MkdirTemp("", "go-adbtest-ui-")
 	if err != nil {
 		return nil, fmt.Errorf("create temporary directory for ui dump: %w", err)
@@ -140,10 +169,22 @@ func (u *Interactor) Dump() ([]Element, error) {
 		_ = os.RemoveAll(tmpDir)
 	}()
 
+	remotePath := "/data/local/tmp/" + filepath.Base(tmpDir) + ".xml"
+	if _, err := client.ShellContext(ctx, "rm -f "+remotePath); err != nil {
+		return nil, fmt.Errorf("remove previous ui dump path: %w (fast path: %v)", err, fastPathErr)
+	}
+	defer func() {
+		_, _ = client.ShellContext(ctx, "rm -f "+remotePath)
+	}()
+	if _, err := client.ShellContext(ctx, "uiautomator dump "+remotePath); err != nil {
+		return nil, fmt.Errorf("uiautomator fallback dump: %w (fast path: %v)", err, fastPathErr)
+	}
+
 	localPath := filepath.Join(tmpDir, "ui.xml")
-	if err := u.ADB.Pull(remotePath, localPath); err != nil {
+	if _, err := client.RunContext(ctx, "pull", remotePath, localPath); err != nil {
 		return nil, fmt.Errorf("pull ui dump: %w", err)
 	}
+	//nolint:gosec // localPath is generated inside the private temporary directory.
 	xmlData, err := os.ReadFile(localPath)
 	if err != nil {
 		return nil, fmt.Errorf("read pulled ui dump: %w", err)
@@ -175,13 +216,43 @@ func hierarchyXML(out string) ([]byte, error) {
 
 // Tap sends an input tap at absolute coordinates.
 func (u *Interactor) Tap(x, y int) error {
-	_, err := u.ADB.Shell(fmt.Sprintf("input tap %d %d", x, y))
+	ctx, cancel := context.WithTimeout(context.Background(), u.operationTimeout())
+	defer cancel()
+	return u.TapContext(ctx, x, y)
+}
+
+// TapContext sends an input tap at absolute coordinates while bounding the ADB
+// command by ctx.
+func (u *Interactor) TapContext(ctx context.Context, x, y int) error {
+	if ctx == nil {
+		return fmt.Errorf("tap UI: nil context")
+	}
+	client, err := u.adbClient()
+	if err != nil {
+		return err
+	}
+	_, err = client.ShellContext(ctx, fmt.Sprintf("input tap %d %d", x, y))
 	return err
 }
 
 // TypeText types text via `adb shell input text`.
 func (u *Interactor) TypeText(text string) error {
-	_, err := u.ADB.Shell("input text " + shellQuote(text))
+	ctx, cancel := context.WithTimeout(context.Background(), u.operationTimeout())
+	defer cancel()
+	return u.TypeTextContext(ctx, text)
+}
+
+// TypeTextContext types text via `adb shell input text` while bounding the ADB
+// command by ctx.
+func (u *Interactor) TypeTextContext(ctx context.Context, text string) error {
+	if ctx == nil {
+		return fmt.Errorf("type UI text: nil context")
+	}
+	client, err := u.adbClient()
+	if err != nil {
+		return err
+	}
+	_, err = client.ShellContext(ctx, "input text "+shellQuote(text))
 	return err
 }
 
@@ -192,22 +263,35 @@ func shellQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", `'\''`) + "'"
 }
 
-func (u *Interactor) tapElement(t testing.TB, el Element) {
+func (u *Interactor) tapElementContext(t testing.TB, ctx context.Context, el *Element) {
 	t.Helper()
+	if el == nil {
+		t.Fatal("tap element: nil element")
+		return
+	}
 	cx, cy := el.Bounds.CenterX(), el.Bounds.CenterY()
-	if err := u.Tap(cx, cy); err != nil {
+	if err := u.TapContext(ctx, cx, cy); err != nil {
 		t.Fatalf("tap(%d, %d): %v", cx, cy, err)
 	}
 }
 
 func (u *Interactor) waitForElement(text string, timeout time.Duration) (Element, error) {
-	deadline := time.Now().Add(timeout)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	return u.waitForElementContext(ctx, text, timeout)
+}
+
+func (u *Interactor) waitForElementContext(ctx context.Context, text string, timeout time.Duration) (Element, error) {
 	var lastElements []Element
-	for time.Now().Before(deadline) {
-		elements, err := u.Dump()
+	var lastErr error
+	for {
+		if err := ctx.Err(); err != nil {
+			return Element{}, waitError(err, lastErr, timeout, "text", text, lastElements)
+		}
+		elements, err := u.DumpContext(ctx)
 		if err == nil {
 			lastElements = elements
-			u.autoDismissANR(elements)
+			u.autoDismissANRContext(ctx, elements)
 			found := FindByText(elements, text)
 			if len(found) > 0 {
 				// Prefer clickable element
@@ -218,39 +302,54 @@ func (u *Interactor) waitForElement(text string, timeout time.Duration) (Element
 				}
 				return found[0], nil
 			}
+		} else {
+			lastErr = err
 		}
-		time.Sleep(pollInterval)
+		if err := waitForPoll(ctx); err != nil {
+			return Element{}, waitError(err, lastErr, timeout, "text", text, lastElements)
+		}
 	}
-	return Element{}, fmt.Errorf("timeout after %v waiting for text %q. Visible: %s", timeout, text, visibleTexts(lastElements))
 }
 
 func (u *Interactor) waitForElementByID(resourceID string, timeout time.Duration) (Element, error) {
-	deadline := time.Now().Add(timeout)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	return u.waitForElementByIDContext(ctx, resourceID, timeout)
+}
+
+func (u *Interactor) waitForElementByIDContext(ctx context.Context, resourceID string, timeout time.Duration) (Element, error) {
 	var lastElements []Element
-	for time.Now().Before(deadline) {
-		elements, err := u.Dump()
+	var lastErr error
+	for {
+		if err := ctx.Err(); err != nil {
+			return Element{}, waitError(err, lastErr, timeout, "resource-id", resourceID, lastElements)
+		}
+		elements, err := u.DumpContext(ctx)
 		if err == nil {
 			lastElements = elements
-			u.autoDismissANR(elements)
+			u.autoDismissANRContext(ctx, elements)
 			found := FindByResourceID(elements, resourceID)
 			if len(found) > 0 {
 				return found[0], nil
 			}
+		} else {
+			lastErr = err
 		}
-		time.Sleep(pollInterval)
+		if err := waitForPoll(ctx); err != nil {
+			return Element{}, waitError(err, lastErr, timeout, "resource-id", resourceID, lastElements)
+		}
 	}
-	return Element{}, fmt.Errorf("timeout after %v waiting for resource-id %q. Visible: %s", timeout, resourceID, visibleTexts(lastElements))
 }
 
 // autoDismissANR taps "Wait" if a SystemUI ANR dialog is showing.
-func (u *Interactor) autoDismissANR(elements []Element) {
+func (u *Interactor) autoDismissANRContext(ctx context.Context, elements []Element) {
 	anr := FindByText(elements, systemUIANRText)
 	if len(anr) == 0 {
 		return
 	}
 	wait := FindByText(elements, "Wait")
 	if len(wait) > 0 {
-		_ = u.Tap(wait[0].Bounds.CenterX(), wait[0].Bounds.CenterY())
+		_ = u.TapContext(ctx, wait[0].Bounds.CenterX(), wait[0].Bounds.CenterY())
 	}
 }
 
@@ -258,7 +357,50 @@ func (u *Interactor) resolveTimeout(timeout []time.Duration) time.Duration {
 	if len(timeout) > 0 && timeout[0] > 0 {
 		return timeout[0]
 	}
-	return u.Timeout
+	return u.operationTimeout()
+}
+
+func (u *Interactor) operationTimeout() time.Duration {
+	if u != nil && u.Timeout > 0 {
+		return u.Timeout
+	}
+	return defaultTimeout
+}
+
+func (u *Interactor) adbClient() (*adb.Client, error) {
+	if u == nil {
+		return nil, fmt.Errorf("UI interactor is nil")
+	}
+	if u.ADB == nil {
+		return nil, fmt.Errorf("UI interactor ADB client is nil")
+	}
+	return u.ADB, nil
+}
+
+func waitForPoll(ctx context.Context) error {
+	timer := time.NewTimer(pollInterval)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func waitError(
+	ctxErr error,
+	lastErr error,
+	timeout time.Duration,
+	kind string,
+	value string,
+	elements []Element,
+) error {
+	message := fmt.Sprintf("timeout after %v waiting for %s %q. Visible: %s", timeout, kind, value, visibleTexts(elements))
+	if lastErr != nil {
+		return fmt.Errorf("%s: %w (last dump error: %v)", message, ctxErr, lastErr)
+	}
+	return fmt.Errorf("%s: %w", message, ctxErr)
 }
 
 // visibleTexts returns a summary of visible text elements for error messages.
