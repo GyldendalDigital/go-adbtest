@@ -3,14 +3,23 @@
 package emulator
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/GyldendalDigital/go-adbtest/adb"
+)
+
+const (
+	defaultBootTimeout     = 120 * time.Second
+	defaultPollInterval    = time.Second
+	defaultShutdownTimeout = 10 * time.Second
 )
 
 // Config holds emulator launch options.
@@ -29,101 +38,263 @@ type Instance struct {
 	PID    int
 	Serial string // e.g. "emulator-5554"
 	ADB    *adb.Client
-	cmd    *exec.Cmd
+
+	cmd             *exec.Cmd
+	done            chan struct{}
+	stateMu         sync.Mutex
+	waitErr         error
+	killOnce        sync.Once
+	killErr         error
+	shutdownTimeout time.Duration
 }
 
 // Start boots an emulator with the given config. Blocks until boot_completed=1.
 func Start(cfg Config) (*Instance, error) {
-	if cfg.Timeout == 0 {
-		cfg.Timeout = 120 * time.Second
-	}
+	return startWithDependencies(cfg, productionStartDependencies())
+}
 
-	emulatorPath, err := findEmulator()
+type startDependencies struct {
+	findEmulator func() (string, error)
+	devices      func(context.Context) ([]string, error)
+	newADB       func(string) (*adb.Client, error)
+	shell        func(context.Context, *adb.Client, string) (string, error)
+	command      func(string, ...string) *exec.Cmd
+	pollInterval time.Duration
+}
+
+func productionStartDependencies() startDependencies {
+	return startDependencies{
+		findEmulator: findEmulator,
+		devices:      adb.DevicesContext,
+		newADB:       adb.New,
+		shell: func(ctx context.Context, client *adb.Client, command string) (string, error) {
+			return client.ShellContext(ctx, command)
+		},
+		command:      exec.Command,
+		pollInterval: defaultPollInterval,
+	}
+}
+
+func normalizeConfig(cfg Config) (Config, error) {
+	if strings.TrimSpace(cfg.AVD) == "" {
+		return Config{}, fmt.Errorf("emulator: AVD is required")
+	}
+	if cfg.Timeout < 0 {
+		return Config{}, fmt.Errorf("emulator: timeout must not be negative")
+	}
+	if cfg.Timeout == 0 {
+		cfg.Timeout = defaultBootTimeout
+	}
+	return cfg, nil
+}
+
+func startWithDependencies(cfg Config, deps startDependencies) (*Instance, error) {
+	cfg, err := normalizeConfig(cfg)
 	if err != nil {
 		return nil, err
 	}
 
-	// Snapshot of devices before launch to detect the new one
-	beforeDevices, _ := adb.Devices("")
+	emulatorPath, err := deps.findEmulator()
+	if err != nil {
+		return nil, err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), cfg.Timeout)
+	defer cancel()
+
+	beforeDevices, err := deps.devices(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list devices before starting emulator: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("emulator boot deadline expired before launch: %w", err)
+	}
 
 	args := buildArgs(cfg)
-	cmd := exec.Command(emulatorPath, args...)
+	cmd := deps.command(emulatorPath, args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("start emulator: %w", err)
 	}
+	inst := newInstance(cmd)
+	processCtx, stopProcessMonitor := context.WithCancel(ctx)
+	defer stopProcessMonitor()
+	go func() {
+		select {
+		case <-inst.processDone():
+			stopProcessMonitor()
+		case <-processCtx.Done():
+		}
+	}()
 
-	// Detect the new serial by diffing device lists
-	serial, err := detectNewSerial(beforeDevices, cfg.Timeout)
+	serial, err := detectNewSerial(processCtx, beforeDevices, inst, deps.devices, deps.pollInterval)
 	if err != nil {
-		_ = cmd.Process.Kill()
-		return nil, fmt.Errorf("detect emulator serial: %w", err)
+		return nil, failStart(inst, fmt.Errorf("detect emulator serial: %w", err))
 	}
+	inst.Serial = serial
 
-	adbClient, err := adb.New(serial)
+	adbClient, err := deps.newADB(serial)
 	if err != nil {
-		_ = cmd.Process.Kill()
-		return nil, fmt.Errorf("create adb client: %w", err)
+		return nil, failStart(inst, fmt.Errorf("create adb client: %w", err))
 	}
+	inst.ADB = adbClient
 
-	inst := &Instance{
-		PID:    cmd.Process.Pid,
-		Serial: serial,
-		ADB:    adbClient,
-		cmd:    cmd,
-	}
-
-	if err := inst.WaitForBoot(cfg.Timeout); err != nil {
-		_ = inst.Kill()
-		return nil, err
+	if err := inst.waitForBoot(processCtx, deps.shell, deps.pollInterval); err != nil {
+		return nil, failStart(inst, err)
 	}
 
 	return inst, nil
 }
 
+func newInstance(cmd *exec.Cmd) *Instance {
+	instance := &Instance{
+		PID:             cmd.Process.Pid,
+		cmd:             cmd,
+		done:            make(chan struct{}),
+		shutdownTimeout: defaultShutdownTimeout,
+	}
+	go func() {
+		err := cmd.Wait()
+		instance.stateMu.Lock()
+		instance.waitErr = err
+		instance.stateMu.Unlock()
+		close(instance.done)
+	}()
+	return instance
+}
+
+func failStart(instance *Instance, startErr error) error {
+	if cleanupErr := instance.terminateAndWait(); cleanupErr != nil {
+		return errors.Join(startErr, fmt.Errorf("clean up emulator process: %w", cleanupErr))
+	}
+	return startErr
+}
+
 // WaitForBoot polls sys.boot_completed with a 1s interval until timeout.
 func (i *Instance) WaitForBoot(timeout time.Duration) error {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		out, err := i.ADB.Shell("getprop sys.boot_completed")
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	return i.waitForBoot(ctx, func(ctx context.Context, client *adb.Client, command string) (string, error) {
+		return client.ShellContext(ctx, command)
+	}, defaultPollInterval)
+}
+
+func (i *Instance) waitForBoot(
+	ctx context.Context,
+	shell func(context.Context, *adb.Client, string) (string, error),
+	pollInterval time.Duration,
+) error {
+	if i == nil || i.ADB == nil {
+		return fmt.Errorf("emulator: cannot wait for boot without an adb client")
+	}
+	if pollInterval <= 0 {
+		pollInterval = defaultPollInterval
+	}
+
+	var lastErr error
+	for {
+		if err := i.exitedBefore("boot completed"); err != nil {
+			return err
+		}
+
+		out, err := shell(ctx, i.ADB, "getprop sys.boot_completed")
 		if err == nil && strings.TrimSpace(out) == "1" {
 			return nil
 		}
-		time.Sleep(1 * time.Second)
+		if err != nil {
+			lastErr = err
+		}
+		if err := i.exitedBefore("boot completed"); err != nil {
+			return err
+		}
+
+		timer := time.NewTimer(pollInterval)
+		select {
+		case <-ctx.Done():
+			stopTimer(timer)
+			// The process monitor also cancels ctx. Prefer the actionable
+			// process-exit error when shutdown races the boot deadline.
+			if err := i.exitedBefore("boot completed"); err != nil {
+				return err
+			}
+			if lastErr != nil {
+				return fmt.Errorf("emulator %s did not boot: %w (last adb error: %v)", i.Serial, ctx.Err(), lastErr)
+			}
+			return fmt.Errorf("emulator %s did not boot: %w", i.Serial, ctx.Err())
+		case <-i.processDone():
+			stopTimer(timer)
+			return i.exitError("boot completed")
+		case <-timer.C:
+		}
 	}
-	return fmt.Errorf("emulator %s did not boot within %v", i.Serial, timeout)
 }
 
 // Kill stops the emulator gracefully, falling back to SIGKILL.
 func (i *Instance) Kill() error {
-	// Try graceful shutdown via adb
-	_, _ = i.ADB.Shell("emu kill")
-
-	// Wait up to 10s for process to exit
-	done := make(chan error, 1)
-	go func() { done <- i.cmd.Wait() }()
-
-	select {
-	case <-done:
+	if i == nil {
 		return nil
-	case <-time.After(10 * time.Second):
-		if i.cmd.Process != nil {
-			return i.cmd.Process.Kill()
+	}
+	i.killOnce.Do(func() {
+		i.killErr = i.kill()
+	})
+	return i.killErr
+}
+
+func (i *Instance) kill() error {
+	if !i.IsRunning() {
+		return nil
+	}
+	if i.ADB == nil || i.cmd == nil || i.cmd.Process == nil {
+		return i.terminateAndWait()
+	}
+
+	timeout := i.shutdownTimeout
+	if timeout <= 0 {
+		timeout = defaultShutdownTimeout
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	_, gracefulErr := i.ADB.RunContext(ctx, "emu", "kill")
+	if gracefulErr != nil {
+		cancel()
+		if err := i.terminateAndWait(); err != nil {
+			return errors.Join(gracefulErr, err)
 		}
 		return nil
 	}
+
+	select {
+	case <-i.processDone():
+		cancel()
+		return nil
+	case <-ctx.Done():
+		cancel()
+	}
+
+	if err := i.terminateAndWait(); err != nil {
+		if gracefulErr != nil {
+			return errors.Join(gracefulErr, err)
+		}
+		return err
+	}
+	return nil
 }
 
 // IsRunning checks if the emulator process is still alive.
 func (i *Instance) IsRunning() bool {
-	if i.cmd.Process == nil {
+	if i == nil || i.cmd == nil || i.cmd.Process == nil {
 		return false
 	}
-	// On Unix, sending signal 0 checks if the process exists.
-	err := i.cmd.Process.Signal(os.Signal(nil))
-	return err == nil
+	if i.done == nil {
+		return i.cmd.ProcessState == nil
+	}
+	select {
+	case <-i.done:
+		return false
+	default:
+		return true
+	}
 }
 
 // buildArgs composes emulator command-line flags from config.
@@ -150,26 +321,125 @@ func buildArgs(cfg Config) []string {
 }
 
 // detectNewSerial waits for a new device serial that wasn't in the before list.
-func detectNewSerial(beforeDevices []string, timeout time.Duration) (string, error) {
-	beforeSet := make(map[string]bool, len(beforeDevices))
+func detectNewSerial(
+	ctx context.Context,
+	beforeDevices []string,
+	instance *Instance,
+	devices func(context.Context) ([]string, error),
+	pollInterval time.Duration,
+) (string, error) {
+	beforeSet := make(map[string]struct{}, len(beforeDevices))
 	for _, s := range beforeDevices {
-		beforeSet[s] = true
+		beforeSet[s] = struct{}{}
+	}
+	if pollInterval <= 0 {
+		pollInterval = defaultPollInterval
 	}
 
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		time.Sleep(1 * time.Second)
-		current, err := adb.Devices("")
-		if err != nil {
-			continue
+	var lastErr error
+	for {
+		if err := instance.exitedBefore("its serial was detected"); err != nil {
+			return "", err
 		}
-		for _, s := range current {
-			if !beforeSet[s] {
-				return s, nil
+
+		current, err := devices(ctx)
+		if err == nil {
+			for _, serial := range current {
+				if _, existed := beforeSet[serial]; !existed {
+					return serial, nil
+				}
 			}
+		} else {
+			lastErr = err
+		}
+		if err := instance.exitedBefore("its serial was detected"); err != nil {
+			return "", err
+		}
+
+		timer := time.NewTimer(pollInterval)
+		select {
+		case <-ctx.Done():
+			stopTimer(timer)
+			// The process monitor also cancels ctx. Prefer the actionable
+			// process-exit error when shutdown races the serial deadline.
+			if err := instance.exitedBefore("its serial was detected"); err != nil {
+				return "", err
+			}
+			if lastErr != nil {
+				return "", fmt.Errorf("no new emulator appeared: %w (last adb error: %v)", ctx.Err(), lastErr)
+			}
+			return "", fmt.Errorf("no new emulator appeared: %w", ctx.Err())
+		case <-instance.processDone():
+			stopTimer(timer)
+			return "", instance.exitError("its serial was detected")
+		case <-timer.C:
 		}
 	}
-	return "", fmt.Errorf("no new emulator appeared within %v", timeout)
+}
+
+func stopTimer(timer *time.Timer) {
+	if timer.Stop() {
+		return
+	}
+	select {
+	case <-timer.C:
+	default:
+	}
+}
+
+func (i *Instance) processDone() <-chan struct{} {
+	if i == nil {
+		return nil
+	}
+	return i.done
+}
+
+func (i *Instance) exitedBefore(phase string) error {
+	if i == nil || i.done == nil {
+		return nil
+	}
+	select {
+	case <-i.done:
+		return i.exitError(phase)
+	default:
+		return nil
+	}
+}
+
+func (i *Instance) exitError(phase string) error {
+	i.stateMu.Lock()
+	waitErr := i.waitErr
+	i.stateMu.Unlock()
+	if waitErr != nil {
+		return fmt.Errorf("emulator process exited before %s: %w", phase, waitErr)
+	}
+	return fmt.Errorf("emulator process exited before %s", phase)
+}
+
+func (i *Instance) terminateAndWait() error {
+	if i == nil || i.cmd == nil || i.cmd.Process == nil {
+		return nil
+	}
+	if !i.IsRunning() {
+		if i.done != nil {
+			<-i.done
+		}
+		return nil
+	}
+
+	killErr := i.cmd.Process.Kill()
+	if killErr != nil && !errors.Is(killErr, os.ErrProcessDone) {
+		return fmt.Errorf("kill emulator process: %w", killErr)
+	}
+
+	if i.done != nil {
+		<-i.done
+		return nil
+	}
+	if waitErr := i.cmd.Wait(); waitErr != nil && killErr != nil {
+		return fmt.Errorf("wait for emulator process: %w", waitErr)
+	}
+	return nil
 }
 
 // findEmulator locates the emulator binary.

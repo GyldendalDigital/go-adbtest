@@ -1,10 +1,15 @@
 package adb
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 func TestFindADB_FromAndroidHome(t *testing.T) {
@@ -121,7 +126,7 @@ echo ""
 		t.Fatal(err)
 	}
 
-	serials, err := Devices(fakeADB)
+	serials, err := devices(context.Background(), fakeADB)
 	if err != nil {
 		t.Fatalf("Devices() error: %v", err)
 	}
@@ -144,11 +149,138 @@ echo ""
 		t.Fatal(err)
 	}
 
-	serials, err := Devices(fakeADB)
+	serials, err := devices(context.Background(), fakeADB)
 	if err != nil {
 		t.Fatalf("Devices() error: %v", err)
 	}
 	if len(serials) != 0 {
 		t.Errorf("Devices() = %v, want empty", serials)
 	}
+}
+
+func TestDevices_UsesDetectedADB(t *testing.T) {
+	tmp := t.TempDir()
+	platformTools := filepath.Join(tmp, "platform-tools")
+	if err := os.MkdirAll(platformTools, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fakeADB := filepath.Join(platformTools, "adb")
+	script := `#!/bin/sh
+echo "List of devices attached"
+echo "emulator-5554 device"
+`
+	if err := os.WriteFile(fakeADB, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ANDROID_HOME", tmp)
+	t.Setenv("ANDROID_SDK_ROOT", "")
+
+	serials, err := Devices()
+	if err != nil {
+		t.Fatalf("Devices() error: %v", err)
+	}
+	if len(serials) != 1 || serials[0] != "emulator-5554" {
+		t.Fatalf("Devices() = %v, want [emulator-5554]", serials)
+	}
+}
+
+func TestClient_RunContext_HostCommandIncludesSerial(t *testing.T) {
+	tmp := t.TempDir()
+	fakeADB := filepath.Join(tmp, "adb")
+	script := `#!/bin/sh
+printf '%s\n' "$@"
+`
+	if err := os.WriteFile(fakeADB, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	client := &Client{Serial: "emulator-5554", ADBPath: fakeADB}
+	out, err := client.RunContext(context.Background(), "emu", "kill")
+	if err != nil {
+		t.Fatalf("RunContext() error: %v", err)
+	}
+	if got, want := strings.Fields(out), []string{"-s", "emulator-5554", "emu", "kill"}; !equalStrings(got, want) {
+		t.Fatalf("RunContext() argv = %v, want %v", got, want)
+	}
+}
+
+func TestClient_ShellContext_PreservesConveniencePrefix(t *testing.T) {
+	tmp := t.TempDir()
+	fakeADB := filepath.Join(tmp, "adb")
+	script := `#!/bin/sh
+printf '%s\n' "$@"
+`
+	if err := os.WriteFile(fakeADB, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	client := &Client{Serial: "device-1", ADBPath: fakeADB}
+	out, err := client.ShellContext(context.Background(), "getprop sys.boot_completed")
+	if err != nil {
+		t.Fatalf("ShellContext() error: %v", err)
+	}
+	if got, want := strings.Fields(out), []string{"-s", "device-1", "shell", "getprop", "sys.boot_completed"}; !equalStrings(got, want) {
+		t.Fatalf("ShellContext() argv = %v, want %v", got, want)
+	}
+}
+
+func TestClient_WaitForDevice_CancelsAndReaps(t *testing.T) {
+	tmp := t.TempDir()
+	fakeADB := filepath.Join(tmp, "adb")
+	pidFile := filepath.Join(tmp, "pid")
+	script := `#!/bin/sh
+echo $$ > "$ADBTEST_PID_FILE"
+while :; do :; done
+`
+	if err := os.WriteFile(fakeADB, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ADBTEST_PID_FILE", pidFile)
+
+	client := &Client{ADBPath: fakeADB}
+	started := time.Now()
+	err := client.WaitForDevice(50 * time.Millisecond)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("WaitForDevice() error = %v, want context deadline exceeded", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("WaitForDevice() took %v after timeout", elapsed)
+	}
+
+	data, readErr := os.ReadFile(pidFile)
+	if readErr != nil {
+		t.Fatalf("read fake adb pid: %v", readErr)
+	}
+	pid, parseErr := strconv.Atoi(strings.TrimSpace(string(data)))
+	if parseErr != nil {
+		t.Fatalf("parse fake adb pid: %v", parseErr)
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for processExists(pid) && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if processExists(pid) {
+		t.Fatalf("fake adb process %d still exists after WaitForDevice returned", pid)
+	}
+}
+
+func equalStrings(got, want []string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func processExists(pid int) bool {
+	process, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	return process.Signal(syscall.Signal(0)) == nil
 }
