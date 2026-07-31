@@ -25,7 +25,7 @@ acceptance criteria, and recovery status.
 | M2 | `emulator/` lifecycle | M1 | Implemented; final audit pending | `679c724` |
 | M3 | `ui/` native interaction | M1 | Implemented; final audit pending | `b3f64c7` |
 | M4 | `cdp/` WebView interaction | M1 | Implemented; final audit pending | `41abba5` |
-| M5 | `permissions/` dialog handling | M3 | In progress; recovered untracked files do not compile under test | — |
+| M5 | `permissions/` dialog handling | M3 | Complete | Local M5 commit after `0f7ebe3` |
 | M5A | Critical `ui/` stabilization found by recovery audit | M3 | In progress | — |
 | M5B | Critical `cdp/` connection/error stabilization found by recovery audit | M4 | Not started | — |
 | M5C | Critical `adb/` and `emulator/` lifecycle stabilization found by recovery audit | M1–M2 | Not started | — |

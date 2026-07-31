@@ -43,9 +43,9 @@ in [docs/work-breakdown.md](docs/work-breakdown.md) and
 ## Phase 5: Permissions — `permissions/` package
 > Handle Android runtime permission dialogs.
 
-- [ ] `Grant` / `Deny` with API-level detection (23–29 vs 30+)
-- [ ] `GrantAll` for multi-permission requests
-- [ ] Unit tests
+- [x] `Grant` / `Deny` with API-level detection (23–29 vs 30+)
+- [x] `GrantAll` for multi-permission requests
+- [x] Unit tests
 
 ## Phase 6: Top-level API — `testkit.go`
 > Compose all packages into the `Device` handle.

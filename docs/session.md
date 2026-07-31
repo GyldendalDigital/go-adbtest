@@ -76,8 +76,10 @@ steps in `.github/instructions/*.instructions.md` for the initial build.
 | 2026-07-31 | Checked Android tooling | No local SDK tools or Android environment variables found |
 | 2026-07-31 | Committed recovery plan | Local commit `2037f27`; nothing pushed |
 | 2026-07-31 | Ran five-specialist recovery audit | Added focused UI, CDP, and adb/emulator stabilization tasks before root composition |
+| 2026-07-31 | Completed M5 permission handling | Race tests pass; controller filtering, API variants, errors, dialog races, sequential grants, and safety cap are covered |
 
 ## Next Action
 
-Complete and commit M5 (`permissions/`), then integrate the focused M5A–M5C
-stabilization commits before starting root composition. Keep all work local.
+Integrate and commit the focused M5A UI patch, then M5B CDP and M5C
+adb/emulator stabilization before starting root composition. Keep all work
+local.
