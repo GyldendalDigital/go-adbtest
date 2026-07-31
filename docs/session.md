@@ -11,8 +11,28 @@ result.
 - The complete race, vet, lint, build, Windows cross-build, module, formatting,
   tagged-example, and vulnerability checks pass.
 - No commit from the recovered implementation session has been pushed.
-- Real Android execution remains external: this host has no Android SDK,
-  emulator, `adb`, `aapt`, or application fixture.
+- Real Android execution was initially recorded as external because the
+  workspace sandbox exposed no SDK, emulator, `adb`, `aapt`, or fixture. The
+  host discovery below corrects that boundary.
+
+## Host Android Follow-up — 2026-07-31
+
+The user clarified that Android tooling is installed on the host outside the
+workspace sandbox. Read-only host discovery found:
+
+- SDK: `/home/mortenolsrud/Android/Sdk` (`adb` 37.0.0 and build-tools 34–37);
+- AVDs: `Medium_35`, `Medium_Phone_API_36.0`, and `Pixel_7`;
+- existing runbook: `ordnett_pluss_v4/scripts/android-run.sh`, defaulting to
+  `Medium_Phone_API_36.0`;
+- debuggable x86_64 APK: `ordnett_pluss_v4/bin/ordnett_pluss_v4.apk` (also
+  present in Gradle debug outputs), package `no.gyldendal.ordnett`, launch
+  activity `com.wails.app.MainActivity`.
+
+No emulator is currently running. The next action is a real owned-AVD smoke of
+root setup/teardown, UI hierarchy access, CDP evaluation, and restart/reconnect.
+The application source has no identified deterministic DOM control that
+requests a runtime permission, so the generic permission-flow example remains
+separate unless live inspection reveals such a control.
 
 ## Recovery Checkpoint — 2026-07-31
 
