@@ -251,7 +251,7 @@ func TestDiscoverWSURL(t *testing.T) {
 		portInt = portInt*10 + int(c-'0')
 	}
 
-	url, err := discoverWSURL(portInt)
+	url, err := discoverWSURL(context.Background(), portInt)
 	if err != nil {
 		t.Fatalf("discoverWSURL() error: %v", err)
 	}
@@ -275,7 +275,7 @@ func TestDiscoverWSURL_NoTargets(t *testing.T) {
 		portInt = portInt*10 + int(c-'0')
 	}
 
-	_, err := discoverWSURL(portInt)
+	_, err := discoverWSURL(context.Background(), portInt)
 	if err == nil {
 		t.Fatal("expected error for no targets")
 	}

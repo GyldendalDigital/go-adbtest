@@ -1,12 +1,20 @@
 package cdp
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/GyldendalDigital/go-adbtest/adb"
+)
+
+const (
+	clientReadyTimeout = 30 * time.Second
+	clientCloseTimeout = 2 * time.Second
 )
 
 // Client provides high-level WebView interactions over CDP.
@@ -19,28 +27,38 @@ type Client struct {
 
 // NewClient creates a CDP client, sets up port forwarding, and connects.
 func NewClient(adbClient *adb.Client, appPackage string, localPort int) (*Client, error) {
-	pid, err := appPID(adbClient, appPackage)
-	if err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), clientReadyTimeout)
+	defer cancel()
+	return NewClientContext(ctx, adbClient, appPackage, localPort)
+}
+
+// NewClientContext creates a CDP client, polling app PID and WebView readiness
+// while honoring one context across ADB forwarding, discovery, and dialing.
+func NewClientContext(ctx context.Context, adbClient *adb.Client, appPackage string, localPort int) (*Client, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("create CDP client: nil context")
+	}
+	if adbClient == nil {
+		return nil, fmt.Errorf("create CDP client: nil ADB client")
+	}
+	if err := validateAppPackage(appPackage); err != nil {
 		return nil, err
 	}
-
-	socketName := fmt.Sprintf("webview_devtools_remote_%d", pid)
-	if err := adbClient.Forward(localPort, socketName); err != nil {
-		return nil, fmt.Errorf("port forward: %w", err)
-	}
-
-	conn, err := ConnectWithRetry(localPort, 30*time.Second)
-	if err != nil {
-		_ = adbClient.RemoveForward(localPort)
+	if err := validateLocalPort(localPort); err != nil {
 		return nil, err
 	}
-
-	return &Client{
-		Conn:       conn,
+	client := &Client{
 		ADB:        adbClient,
 		LocalPort:  localPort,
 		AppPackage: appPackage,
-	}, nil
+	}
+
+	conn, err := client.connectContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	client.Conn = conn
+	return client, nil
 }
 
 // Eval evaluates a JS expression and returns the string result.
@@ -130,7 +148,7 @@ func (c *Client) Click(t testing.TB, cssSelector string) {
 // WaitForSelector polls until a CSS selector matches a visible element.
 func (c *Client) WaitForSelector(t testing.TB, cssSelector string, timeout time.Duration) {
 	t.Helper()
-	js := fmt.Sprintf(`document.querySelector(%q) !== null`, cssSelector)
+	js := visibleSelectorExpression(cssSelector)
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		result, err := c.EvalE(js)
@@ -140,6 +158,22 @@ func (c *Client) WaitForSelector(t testing.TB, cssSelector string, timeout time.
 		time.Sleep(200 * time.Millisecond)
 	}
 	t.Fatalf("WaitForSelector(%q): timeout after %v", cssSelector, timeout)
+}
+
+func visibleSelectorExpression(cssSelector string) string {
+	return fmt.Sprintf(`(() => {
+  const element = document.querySelector(%q);
+  if (!element) return false;
+  for (let current = element; current; current = current.parentElement) {
+    const style = getComputedStyle(current);
+    if (style.display === "none" || style.visibility === "hidden" ||
+        style.visibility === "collapse" || Number.parseFloat(style.opacity) === 0) {
+      return false;
+    }
+  }
+  const rect = element.getBoundingClientRect();
+  return rect.width > 0 && rect.height > 0;
+})()`, cssSelector)
 }
 
 // WaitForText polls until an element's textContent contains the substring.
@@ -165,36 +199,91 @@ func (c *Client) WaitForText(t testing.TB, cssSelector string, text string, time
 // Reconnect re-discovers the app PID, re-forwards the port, and reconnects.
 func (c *Client) Reconnect(t testing.TB) {
 	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), clientReadyTimeout)
+	defer cancel()
+	if err := c.ReconnectContext(ctx); err != nil {
+		t.Fatalf("CDP Reconnect: %v", err)
+	}
+}
 
-	_ = c.Conn.Close()
-	_ = c.ADB.RemoveForward(c.LocalPort)
-
-	pid, err := appPID(c.ADB, c.AppPackage)
-	if err != nil {
-		t.Fatalf("CDP Reconnect: get PID: %v", err)
+// ReconnectContext closes the old connection, then polls the app PID and
+// WebView readiness while honoring ctx.
+func (c *Client) ReconnectContext(ctx context.Context) error {
+	if ctx == nil {
+		return fmt.Errorf("reconnect CDP client: nil context")
+	}
+	if c.ADB == nil {
+		return fmt.Errorf("reconnect CDP client: nil ADB client")
+	}
+	if err := validateAppPackage(c.AppPackage); err != nil {
+		return err
+	}
+	if err := validateLocalPort(c.LocalPort); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("reconnect CDP client: %w", err)
 	}
 
-	socketName := fmt.Sprintf("webview_devtools_remote_%d", pid)
-	if err := c.ADB.Forward(c.LocalPort, socketName); err != nil {
-		t.Fatalf("CDP Reconnect: forward: %v", err)
+	oldConn := c.Conn
+	c.Conn = nil
+	var closeErr error
+	if oldConn != nil {
+		closeErr = oldConn.closeNow()
+	}
+	removeErr := c.removeForwardContext(ctx)
+	if err := errors.Join(closeErr, removeErr); err != nil {
+		return fmt.Errorf("prepare CDP reconnect: %w", err)
 	}
 
-	conn, err := ConnectWithRetry(c.LocalPort, 30*time.Second)
+	conn, err := c.connectContext(ctx)
 	if err != nil {
-		t.Fatalf("CDP Reconnect: connect: %v", err)
+		return err
 	}
 	c.Conn = conn
+	return nil
 }
 
 // Close closes the CDP connection and removes port forwarding.
 func (c *Client) Close() error {
-	err := c.Conn.Close()
-	_ = c.ADB.RemoveForward(c.LocalPort)
-	return err
+	ctx, cancel := context.WithTimeout(context.Background(), clientCloseTimeout)
+	defer cancel()
+	return c.CloseContext(ctx)
 }
 
-func appPID(adbClient *adb.Client, pkg string) (int, error) {
-	out, err := adbClient.Shell("pidof " + pkg)
+// CloseContext immediately closes the CDP connection and removes its port
+// forward within ctx. It is safe on nil and partially initialized clients.
+func (c *Client) CloseContext(ctx context.Context) error {
+	if c == nil {
+		return nil
+	}
+	if ctx == nil {
+		return fmt.Errorf("close CDP client: nil context")
+	}
+
+	conn := c.Conn
+	c.Conn = nil
+	var closeErr error
+	if conn != nil {
+		closeErr = conn.closeNow()
+	}
+
+	var removeErr error
+	if c.ADB != nil {
+		if err := validateLocalPort(c.LocalPort); err != nil {
+			removeErr = err
+		} else {
+			removeErr = c.removeForwardContext(ctx)
+		}
+	}
+	return errors.Join(closeErr, removeErr)
+}
+
+func appPIDContext(ctx context.Context, adbClient *adb.Client, pkg string) (int, error) {
+	if err := validateAppPackage(pkg); err != nil {
+		return 0, err
+	}
+	out, err := adbClient.ShellContext(ctx, "pidof "+pkg)
 	if err != nil {
 		return 0, fmt.Errorf("get PID of %s: %w", pkg, err)
 	}
@@ -202,7 +291,82 @@ func appPID(adbClient *adb.Client, pkg string) (int, error) {
 	if _, err := fmt.Sscanf(out, "%d", &pid); err != nil {
 		return 0, fmt.Errorf("parse PID %q: %w", out, err)
 	}
+	if pid <= 0 {
+		return 0, fmt.Errorf("parse PID %q: PID must be positive", out)
+	}
 	return pid, nil
+}
+
+func (c *Client) connectContext(ctx context.Context) (conn *Conn, err error) {
+	var lastErr error
+	forwarded := false
+	defer func() {
+		if err == nil || !forwarded {
+			return
+		}
+		if cleanupErr := c.cleanupForward(); cleanupErr != nil {
+			err = errors.Join(err, cleanupErr)
+		}
+	}()
+
+	for {
+		if contextErr := ctx.Err(); contextErr != nil {
+			return nil, retryError("connect CDP client", contextErr, lastErr)
+		}
+
+		pid, attemptErr := appPIDContext(ctx, c.ADB, c.AppPackage)
+		if attemptErr == nil {
+			socketName := fmt.Sprintf("webview_devtools_remote_%d", pid)
+			_, attemptErr = c.ADB.RunContext(
+				ctx,
+				"forward",
+				fmt.Sprintf("tcp:%d", c.LocalPort),
+				"localabstract:"+socketName,
+			)
+			if attemptErr == nil {
+				forwarded = true
+				conn, attemptErr = ConnectContext(ctx, c.LocalPort)
+				if attemptErr == nil {
+					return conn, nil
+				}
+			}
+		}
+		lastErr = attemptErr
+
+		if retryErr := waitForRetry(ctx); retryErr != nil {
+			return nil, retryError("connect CDP client", retryErr, lastErr)
+		}
+	}
+}
+
+func (c *Client) removeForwardContext(ctx context.Context) error {
+	_, err := c.ADB.RunContext(ctx, "forward", "--remove", fmt.Sprintf("tcp:%d", c.LocalPort))
+	if err != nil {
+		return fmt.Errorf("remove CDP port forward: %w", err)
+	}
+	return nil
+}
+
+func (c *Client) cleanupForward() error {
+	ctx, cancel := context.WithTimeout(context.Background(), clientCloseTimeout)
+	defer cancel()
+	return c.removeForwardContext(ctx)
+}
+
+func validateAppPackage(appPackage string) error {
+	if appPackage == "" {
+		return fmt.Errorf("app package is required")
+	}
+	if strings.HasPrefix(appPackage, ".") || strings.HasSuffix(appPackage, ".") || strings.Contains(appPackage, "..") {
+		return fmt.Errorf("invalid app package %q", appPackage)
+	}
+	for _, char := range appPackage {
+		if char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z' || char >= '0' && char <= '9' || char == '_' || char == '.' {
+			continue
+		}
+		return fmt.Errorf("invalid app package %q", appPackage)
+	}
+	return nil
 }
 
 // extractValue extracts the string value from a Runtime.evaluate response.
