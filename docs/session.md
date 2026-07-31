@@ -54,6 +54,17 @@ steps in `.github/instructions/*.instructions.md` for the initial build.
 5. There is no Android SDK, `adb`, emulator, or `aapt` available in this local
    environment. Unit behavior must be covered with fakes; real Android
    integration remains an explicitly recorded external validation step.
+6. Recovery review found three blockers in already committed code: normal
+   `/dev/tty` UI dumps include trailing status text that currently breaks XML
+   parsing; CDP protocol/disconnect failures are currently reported as success;
+   and CDP HTTP discovery has no request timeout. These must be fixed before
+   composing the root API.
+7. Emulator shutdown currently runs `emu kill` through `adb shell` instead of
+   the adb emulator command, and failure paths do not reliably reap the child
+   process. Correct this before root teardown depends on it.
+8. README and `go.mod` disagree on the minimum Go version (`1.23+` versus
+   `go 1.26.5`). Reconcile the module directive, CI coverage, and docs during
+   M7/M8.
 
 ## Execution Log
 
@@ -63,9 +74,10 @@ steps in `.github/instructions/*.instructions.md` for the initial build.
 | 2026-07-31 | Ran `go test -count=1 ./...` | Failed only because the recovered permissions test does not compile |
 | 2026-07-31 | Ran `go vet ./...` | Failed at the same permissions test compile error |
 | 2026-07-31 | Checked Android tooling | No local SDK tools or Android environment variables found |
+| 2026-07-31 | Committed recovery plan | Local commit `2037f27`; nothing pushed |
+| 2026-07-31 | Ran five-specialist recovery audit | Added focused UI, CDP, and adb/emulator stabilization tasks before root composition |
 
 ## Next Action
 
-Complete M5 (`permissions/`) with deterministic behavior tests, run full local
-validation, update this log and the roadmap, and create the focused local
-permissions commit.
+Complete and commit M5 (`permissions/`), then integrate the focused M5A–M5C
+stabilization commits before starting root composition. Keep all work local.

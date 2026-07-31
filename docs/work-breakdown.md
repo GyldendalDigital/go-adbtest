@@ -26,7 +26,10 @@ acceptance criteria, and recovery status.
 | M3 | `ui/` native interaction | M1 | Implemented; final audit pending | `b3f64c7` |
 | M4 | `cdp/` WebView interaction | M1 | Implemented; final audit pending | `41abba5` |
 | M5 | `permissions/` dialog handling | M3 | In progress; recovered untracked files do not compile under test | — |
-| M6 | Root `adbtest` device/testkit API | M1–M5 | Not started | — |
+| M5A | Critical `ui/` stabilization found by recovery audit | M3 | In progress | — |
+| M5B | Critical `cdp/` connection/error stabilization found by recovery audit | M4 | Not started | — |
+| M5C | Critical `adb/` and `emulator/` lifecycle stabilization found by recovery audit | M1–M2 | Not started | — |
+| M6 | Root `adbtest` device/testkit API | M1–M5C | Not started | — |
 | M7 | Examples and public documentation | M6 | Not started | — |
 | M8 | Cross-package council review and release-quality validation | M1–M7 | Not started | — |
 
@@ -69,6 +72,24 @@ Acceptance criteria:
 - Implement idempotent teardown plus force-stop, launch, and restart behavior.
 - Exercise orchestration and command construction through deterministic test
   seams; no Android SDK is required for unit tests.
+
+### M5A–M5C — Recovered prerequisite stabilization
+
+The recovery council found correctness problems that would make the composed
+root API unreliable. Fix them in focused package commits before M6:
+
+- `ui/`: isolate XML from the normal trailing `uiautomator` status line, use
+  the documented file/pull fallback if fast parsing fails, and reject malformed
+  element bounds rather than tapping `(0,0)`.
+- `cdp/`: propagate protocol and disconnect errors, make concurrent close safe,
+  bound HTTP discovery by the caller's retry timeout, validate HTTP status, and
+  test visible-selector semantics.
+- `adb/` and `emulator/`: reconcile the public `Devices` API, send emulator
+  shutdown through `adb emu kill` rather than `adb shell`, detect early process
+  exit, reap failed processes, and keep setup within one boot-time budget.
+
+Each package fix must add regression tests and pass its race test and vet before
+its local commit. Broader non-blocking refinements remain in M8.
 
 ### M7 — Examples and documentation
 
