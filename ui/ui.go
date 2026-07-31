@@ -311,12 +311,6 @@ func (u *Interactor) waitForElementContext(ctx context.Context, text string, tim
 	}
 }
 
-func (u *Interactor) waitForElementByID(resourceID string, timeout time.Duration) (Element, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-	return u.waitForElementByIDContext(ctx, resourceID, timeout)
-}
-
 func (u *Interactor) waitForElementByIDContext(ctx context.Context, resourceID string, timeout time.Duration) (Element, error) {
 	var lastElements []Element
 	var lastErr error

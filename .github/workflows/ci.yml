@@ -23,6 +23,9 @@ jobs:
       - name: Run tests
         run: go test -race -coverprofile=coverage.out ./...
 
+      - name: Test Android integration example without an SDK
+        run: go test -count=1 -tags=android_integration ./examples
+
       - name: Upload coverage
         if: github.event_name == 'pull_request'
         uses: actions/upload-artifact@v7
