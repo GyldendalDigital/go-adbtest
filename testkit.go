@@ -48,6 +48,11 @@ type Config struct {
 	Headless bool
 	// GPU selects the GPU mode for an owned AVD. Zero uses auto.
 	GPU string
+	// Cores overrides the virtual CPU count for an owned AVD. Zero uses its setting.
+	Cores int
+	// MemoryMB overrides owned-AVD RAM in megabytes. Zero uses its setting;
+	// non-zero values must be between 1536 and 8192.
+	MemoryMB int
 	// NoAudio disables audio for an owned AVD.
 	NoAudio bool
 	// WipeData wipes an owned AVD before boot.
@@ -62,6 +67,23 @@ type Config struct {
 	AppTimeout time.Duration
 	// CDPPort is the host TCP port used for WebView forwarding. Zero means 9222.
 	CDPPort int
+}
+
+// HeadlessAVD returns a conservative starting configuration for an owned AVD.
+// It caps the emulator at two virtual CPUs, disables the window, audio, and
+// snapshots, and lets the emulator choose the graphics backend. It deliberately
+// leaves WipeData false and RAM image-managed. Callers may override any field
+// before passing the configuration to Setup.
+func HeadlessAVD(avd, apk string) Config {
+	return Config{
+		AVD:        avd,
+		APK:        apk,
+		Headless:   true,
+		GPU:        "auto",
+		Cores:      2,
+		NoAudio:    true,
+		NoSnapshot: true,
+	}
 }
 
 // Device is the main handle for interacting with a configured Android test
@@ -127,8 +149,9 @@ func (d *Device) ForceStop() error {
 	return d.forceStopContext(ctx)
 }
 
-// LaunchApp starts the configured launcher activity and fails t if it cannot
-// be started within AppTimeout.
+// LaunchApp requests the configured activity launch and fails t when Android
+// rejects the command or AppTimeout expires. It does not establish application
+// readiness or reconnect CDP; use a UI or CDP wait when readiness matters.
 func (d *Device) LaunchApp(t testing.TB) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), d.appOperationTimeout())
@@ -256,6 +279,8 @@ func setupWithDependencies(cfg Config, deps *testkitDependencies) (*Device, erro
 			AVD:        cfg.AVD,
 			Headless:   cfg.Headless,
 			GPU:        cfg.GPU,
+			Cores:      cfg.Cores,
+			MemoryMB:   cfg.MemoryMB,
 			NoAudio:    cfg.NoAudio,
 			WipeData:   cfg.WipeData,
 			NoSnapshot: cfg.NoSnapshot,
@@ -373,11 +398,20 @@ func normalizeConfig(cfg Config) (Config, error) {
 	if cfg.AppTimeout < 0 {
 		return Config{}, errors.New("AppTimeout must not be negative")
 	}
+	if cfg.Cores < 0 || cfg.Cores > 64 {
+		return Config{}, fmt.Errorf("cores must be between 0 and 64, got %d", cfg.Cores)
+	}
+	if cfg.MemoryMB != 0 && (cfg.MemoryMB < 1536 || cfg.MemoryMB > 8192) {
+		return Config{}, fmt.Errorf("MemoryMB must be between 1536 and 8192, got %d", cfg.MemoryMB)
+	}
 	if cfg.CDPPort < 0 || cfg.CDPPort > 65535 {
 		return Config{}, fmt.Errorf("CDPPort must be between 1 and 65535, got %d", cfg.CDPPort)
 	}
-	if cfg.Serial != "" && (cfg.Headless || cfg.GPU != "" || cfg.NoAudio || cfg.WipeData || cfg.NoSnapshot) {
-		return Config{}, errors.New("headless, GPU, NoAudio, WipeData, and NoSnapshot apply only when AVD is set")
+	if cfg.Serial != "" && (cfg.Headless || cfg.GPU != "" || cfg.Cores != 0 || cfg.MemoryMB != 0 ||
+		cfg.NoAudio || cfg.WipeData || cfg.NoSnapshot) {
+		return Config{}, errors.New(
+			"headless, GPU, Cores, MemoryMB, NoAudio, WipeData, and NoSnapshot apply only when AVD is set",
+		)
 	}
 	if cfg.AppPackage != "" {
 		if err := validatePackageName(cfg.AppPackage); err != nil {
@@ -908,7 +942,7 @@ func activityStartOutputError(output string) string {
 		}
 		status := strings.TrimSpace(strings.TrimPrefix(line, "Status:"))
 		// Activity Manager can stop waiting for the first rendered frame and
-		// report "timeout" even though it successfully delivered the intent.
+		// report "timeout" after it has accepted the launch result.
 		// Setup and RestartApp subsequently prove readiness through CDP, while
 		// actual launch failures are reported as Error/Error type lines above.
 		if !strings.EqualFold(status, "ok") && !strings.EqualFold(status, "timeout") {

@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -20,6 +21,8 @@ const (
 	defaultBootTimeout     = 120 * time.Second
 	defaultPollInterval    = time.Second
 	defaultShutdownTimeout = 10 * time.Second
+	minimumMemoryMB        = 1536
+	maximumMemoryMB        = 8192
 )
 
 // Config holds emulator launch options.
@@ -30,6 +33,11 @@ type Config struct {
 	Headless bool
 	// GPU selects the emulator GPU mode, such as "auto", "host", or "software".
 	GPU string
+	// Cores overrides the AVD's virtual CPU count. Zero uses the AVD setting.
+	Cores int
+	// MemoryMB overrides the AVD's RAM in megabytes. Zero uses the AVD setting;
+	// non-zero values must be between 1536 and 8192.
+	MemoryMB int
 	// NoAudio adds the emulator's -no-audio option.
 	NoAudio bool
 	// WipeData starts the emulator with -wipe-data.
@@ -92,6 +100,17 @@ func normalizeConfig(cfg Config) (Config, error) {
 	}
 	if cfg.Timeout < 0 {
 		return Config{}, fmt.Errorf("emulator: timeout must not be negative")
+	}
+	if cfg.Cores < 0 || cfg.Cores > 64 {
+		return Config{}, fmt.Errorf("emulator: cores must be between 0 and 64, got %d", cfg.Cores)
+	}
+	if cfg.MemoryMB != 0 && (cfg.MemoryMB < minimumMemoryMB || cfg.MemoryMB > maximumMemoryMB) {
+		return Config{}, fmt.Errorf(
+			"emulator: memory must be between %d and %d MB, got %d",
+			minimumMemoryMB,
+			maximumMemoryMB,
+			cfg.MemoryMB,
+		)
 	}
 	if cfg.Timeout == 0 {
 		cfg.Timeout = defaultBootTimeout
@@ -319,6 +338,12 @@ func buildArgs(cfg Config) []string {
 	}
 	if cfg.GPU != "" {
 		args = append(args, "-gpu", cfg.GPU)
+	}
+	if cfg.Cores > 0 {
+		args = append(args, "-cores", strconv.Itoa(cfg.Cores))
+	}
+	if cfg.MemoryMB > 0 {
+		args = append(args, "-memory", strconv.Itoa(cfg.MemoryMB))
 	}
 	if cfg.NoAudio {
 		args = append(args, "-no-audio")

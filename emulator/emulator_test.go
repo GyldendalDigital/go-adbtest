@@ -17,7 +17,9 @@ func TestBuildArgs_AllOptions(t *testing.T) {
 	cfg := Config{
 		AVD:        "Pixel_7",
 		Headless:   true,
-		GPU:        "software",
+		GPU:        "auto",
+		Cores:      2,
+		MemoryMB:   1536,
 		NoAudio:    true,
 		WipeData:   true,
 		NoSnapshot: true,
@@ -31,7 +33,11 @@ func TestBuildArgs_AllOptions(t *testing.T) {
 		"-no-boot-anim": true,
 		"-no-window":    true,
 		"-gpu":          true,
-		"software":      true,
+		"auto":          true,
+		"-cores":        true,
+		"2":             true,
+		"-memory":       true,
+		"1536":          true,
 		"-no-audio":     true,
 		"-wipe-data":    true,
 		"-no-snapshot":  true,
@@ -109,6 +115,10 @@ func TestNormalizeConfig(t *testing.T) {
 		{name: "missing AVD", cfg: Config{}},
 		{name: "blank AVD", cfg: Config{AVD: " \t "}},
 		{name: "negative timeout", cfg: Config{AVD: "Test", Timeout: -time.Second}},
+		{name: "negative cores", cfg: Config{AVD: "Test", Cores: -1}},
+		{name: "too many cores", cfg: Config{AVD: "Test", Cores: 65}},
+		{name: "memory below minimum", cfg: Config{AVD: "Test", MemoryMB: 1535}},
+		{name: "memory above maximum", cfg: Config{AVD: "Test", MemoryMB: 8193}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if _, err := normalizeConfig(tc.cfg); err == nil {

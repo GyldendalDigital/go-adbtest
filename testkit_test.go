@@ -141,6 +141,25 @@ func avdConfig() Config {
 	return Config{AVD: "Pixel_7", APK: testAPK}
 }
 
+func TestHeadlessAVDUsesConservativeOwnedEmulatorProfile(t *testing.T) {
+	got := HeadlessAVD("Pixel_7", testAPK)
+	want := Config{
+		AVD:        "Pixel_7",
+		APK:        testAPK,
+		Headless:   true,
+		GPU:        "auto",
+		Cores:      2,
+		NoAudio:    true,
+		NoSnapshot: true,
+	}
+	if got != want {
+		t.Fatalf("HeadlessAVD() = %+v, want %+v", got, want)
+	}
+	if got.WipeData {
+		t.Fatal("HeadlessAVD() unexpectedly enabled WipeData")
+	}
+}
+
 func TestNormalizeConfigAppliesDefaultsWithoutChangingBools(t *testing.T) {
 	got, err := normalizeConfig(avdConfig())
 	if err != nil {
@@ -172,6 +191,8 @@ func TestNormalizeConfigPreservesExplicitValues(t *testing.T) {
 		AppActivity: " .MainActivity ",
 		Headless:    true,
 		GPU:         " host ",
+		Cores:       3,
+		MemoryMB:    2048,
 		NoAudio:     true,
 		WipeData:    true,
 		NoSnapshot:  true,
@@ -188,7 +209,8 @@ func TestNormalizeConfigPreservesExplicitValues(t *testing.T) {
 		got.AppActivity != ".MainActivity" || got.GPU != "host" {
 		t.Fatalf("trimmed config = %+v", got)
 	}
-	if !got.Headless || !got.NoAudio || !got.WipeData || !got.NoSnapshot || got.BootTimeout != 45*time.Second ||
+	if !got.Headless || !got.NoAudio || !got.WipeData || !got.NoSnapshot || got.Cores != 3 || got.MemoryMB != 2048 ||
+		got.BootTimeout != 45*time.Second ||
 		got.AppTimeout != 12*time.Second || got.CDPPort != 9333 {
 		t.Fatalf("explicit values changed: %+v", got)
 	}
@@ -207,7 +229,12 @@ func TestNormalizeConfigRejectsInvalidInput(t *testing.T) {
 		{name: "negative app timeout", cfg: Config{AVD: "a", APK: testAPK, AppTimeout: -1}, want: "AppTimeout"},
 		{name: "negative port", cfg: Config{AVD: "a", APK: testAPK, CDPPort: -1}, want: "CDPPort"},
 		{name: "large port", cfg: Config{AVD: "a", APK: testAPK, CDPPort: 65536}, want: "CDPPort"},
+		{name: "negative cores", cfg: Config{AVD: "a", APK: testAPK, Cores: -1}, want: "cores"},
+		{name: "too many cores", cfg: Config{AVD: "a", APK: testAPK, Cores: 65}, want: "cores"},
+		{name: "memory below minimum", cfg: Config{AVD: "a", APK: testAPK, MemoryMB: 1535}, want: "MemoryMB"},
+		{name: "memory above maximum", cfg: Config{AVD: "a", APK: testAPK, MemoryMB: 8193}, want: "MemoryMB"},
 		{name: "AVD option with serial", cfg: Config{Serial: "s", APK: testAPK, NoAudio: true}, want: "apply only"},
+		{name: "resource cap with serial", cfg: Config{Serial: "s", APK: testAPK, Cores: 2}, want: "apply only"},
 		{name: "snapshot option with serial", cfg: Config{Serial: "s", APK: testAPK, NoSnapshot: true}, want: "apply only"},
 		{name: "invalid package", cfg: Config{AVD: "a", APK: testAPK, AppPackage: "bad package"}, want: "invalid package"},
 		{name: "invalid process", cfg: Config{AVD: "a", APK: testAPK, AppProcess: "bad process"}, want: "invalid app process"},
@@ -428,6 +455,8 @@ func TestSetupAVDOrchestratesAndAppliesEffectiveConfig(t *testing.T) {
 	}
 	cfg := avdConfig()
 	cfg.Headless = true
+	cfg.Cores = 2
+	cfg.MemoryMB = 1536
 	cfg.NoAudio = true
 	cfg.WipeData = true
 	cfg.NoSnapshot = true
@@ -444,6 +473,7 @@ func TestSetupAVDOrchestratesAndAppliesEffectiveConfig(t *testing.T) {
 		t.Fatalf("effective app config = %+v", device.Config)
 	}
 	if emulatorConfig.AVD != cfg.AVD || emulatorConfig.GPU != defaultGPU || !emulatorConfig.Headless ||
+		emulatorConfig.Cores != 2 || emulatorConfig.MemoryMB != 1536 ||
 		!emulatorConfig.NoAudio || !emulatorConfig.WipeData || !emulatorConfig.NoSnapshot ||
 		emulatorConfig.Timeout != defaultBootTimeout {
 		t.Fatalf("emulator config = %+v", emulatorConfig)
@@ -879,6 +909,7 @@ func TestLifecycleRejectsCommandReportedErrors(t *testing.T) {
 	for _, output := range []string{
 		"Error: Activity class does not exist",
 		"Error type 3\nError: Activity class does not exist",
+		"Starting: Intent\nStatus: failed\nComplete",
 	} {
 		deps := fakeDependencies(&eventLog{})
 		deps.shellADB = func(context.Context, *adb.Client, string) (string, error) {
