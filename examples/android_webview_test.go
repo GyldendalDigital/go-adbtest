@@ -24,6 +24,11 @@ type fixtureConfig struct {
 	resultSelector            string
 	expectedText              string
 	interactionTimeout        time.Duration
+	filePickerEnabled         bool
+}
+
+func (f fixtureConfig) hasPermissionFlow() bool {
+	return f.permissionTriggerSelector != "" && f.resultSelector != "" && f.expectedText != ""
 }
 
 func TestMain(m *testing.M) {
@@ -69,6 +74,9 @@ func runExampleSuite(m *testing.M) (exitCode int) {
 
 func TestWebViewPermissionFlow(t *testing.T) {
 	device := requireExampleDevice(t)
+	if !exampleFixture.hasPermissionFlow() {
+		t.Skip("set all three permission-flow variables to run the optional runtime-permission example")
+	}
 
 	// Restarting gives every test a clean application lifecycle while retaining
 	// the emulator/device selected by TestMain.
@@ -101,6 +109,12 @@ func TestWebViewPermissionFlow(t *testing.T) {
 	}
 }
 
+func TestWebViewLifecycle(t *testing.T) {
+	device := requireExampleDevice(t)
+	device.RestartApp(t)
+	device.CDP.WaitForSelector(t, "html", exampleFixture.interactionTimeout)
+}
+
 func requireExampleDevice(t *testing.T) *adbtest.Device {
 	t.Helper()
 	if exampleSkipReason != "" {
@@ -121,12 +135,7 @@ func TestExampleConfigurationModes(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	base := map[string]string{
-		"ADBTEST_APK":                         apkPath,
-		"ADBTEST_PERMISSION_TRIGGER_SELECTOR": "#request-permission",
-		"ADBTEST_RESULT_SELECTOR":             "#permission-status",
-		"ADBTEST_EXPECTED_TEXT":               "granted",
-	}
+	base := map[string]string{"ADBTEST_APK": apkPath}
 
 	tests := []struct {
 		name   string
@@ -134,26 +143,42 @@ func TestExampleConfigurationModes(t *testing.T) {
 		assert func(*testing.T, adbtest.Config)
 	}{
 		{
-			name: "owned AVD",
+			name: "owned AVD safe defaults",
 			env: mergeEnvironment(base, map[string]string{
-				"ADBTEST_AVD":         "Pixel_API_35",
+				"ADBTEST_AVD":         "small_phone_api_34",
 				"ADBTEST_APP_PROCESS": ":webview",
-				"ADBTEST_HEADLESS":    "true",
-				"ADBTEST_NO_AUDIO":    "true",
-				"ADBTEST_WIPE_DATA":   "true",
-				"ADBTEST_NO_SNAPSHOT": "true",
-				"ADBTEST_GPU":         "auto",
 			}),
 			assert: func(t *testing.T, config adbtest.Config) {
 				t.Helper()
-				if config.AVD != "Pixel_API_35" || config.Serial != "" {
+				if config.AVD != "small_phone_api_34" || config.Serial != "" {
 					t.Fatalf("unexpected AVD config: %+v", config)
 				}
-				if !config.Headless || !config.NoAudio || !config.WipeData || !config.NoSnapshot {
-					t.Fatalf("AVD flags were not applied: %+v", config)
+				if !config.Headless || !config.NoAudio || config.WipeData || !config.NoSnapshot ||
+					config.GPU != "auto" || config.Cores != 2 || config.MemoryMB != 0 {
+					t.Fatalf("safe AVD defaults were not applied: %+v", config)
 				}
 				if config.AppProcess != ":webview" {
 					t.Fatalf("app process = %q, want :webview", config.AppProcess)
+				}
+			},
+		},
+		{
+			name: "owned AVD explicit overrides",
+			env: mergeEnvironment(base, map[string]string{
+				"ADBTEST_AVD":         "Pixel_7",
+				"ADBTEST_CORES":       "3",
+				"ADBTEST_MEMORY_MB":   "2048",
+				"ADBTEST_HEADLESS":    "false",
+				"ADBTEST_NO_AUDIO":    "false",
+				"ADBTEST_WIPE_DATA":   "true",
+				"ADBTEST_NO_SNAPSHOT": "false",
+				"ADBTEST_GPU":         "swiftshader",
+			}),
+			assert: func(t *testing.T, config adbtest.Config) {
+				t.Helper()
+				if config.Headless || config.NoAudio || !config.WipeData || config.NoSnapshot ||
+					config.GPU != "swiftshader" || config.Cores != 3 || config.MemoryMB != 2048 {
+					t.Fatalf("explicit AVD overrides were not applied: %+v", config)
 				}
 			},
 		},
@@ -188,6 +213,83 @@ func TestExampleConfigurationModes(t *testing.T) {
 	}
 }
 
+func TestExampleConfigurationRejectsPartialPermissionFlow(t *testing.T) {
+	apkPath := t.TempDir() + "/fixture.apk"
+	if err := os.WriteFile(apkPath, []byte("compile-check fixture"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, _, _, err := loadExampleEnvironment(mapEnvironment(map[string]string{
+		"ADBTEST_APK":                         apkPath,
+		"ADBTEST_SERIAL":                      "emulator-5554",
+		"ADBTEST_PERMISSION_TRIGGER_SELECTOR": "#request-permission",
+	}))
+	if err == nil || !strings.Contains(err.Error(), "permission-flow variables") {
+		t.Fatalf("partial permission fixture error = %v", err)
+	}
+}
+
+func TestExampleConfigurationEnablesFilePicker(t *testing.T) {
+	apkPath := t.TempDir() + "/fixture.apk"
+	if err := os.WriteFile(apkPath, []byte("compile-check fixture"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, fixture, skipReason, err := loadExampleEnvironment(mapEnvironment(map[string]string{
+		"ADBTEST_APK":         apkPath,
+		"ADBTEST_SERIAL":      "emulator-5554",
+		"ADBTEST_FILE_PICKER": "true",
+	}))
+	if err != nil || skipReason != "" || !fixture.filePickerEnabled {
+		t.Fatalf("file-picker configuration = %+v, skip %q, error %v", fixture, skipReason, err)
+	}
+}
+
+func TestExampleConfigurationRejectsInvalidResourceSettings(t *testing.T) {
+	apkPath := t.TempDir() + "/fixture.apk"
+	if err := os.WriteFile(apkPath, []byte("compile-check fixture"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name string
+		env  map[string]string
+		want string
+	}{
+		{
+			name: "too many cores",
+			env: map[string]string{
+				"ADBTEST_APK":   apkPath,
+				"ADBTEST_AVD":   "small_phone_api_34",
+				"ADBTEST_CORES": "65",
+			},
+			want: "ADBTEST_CORES",
+		},
+		{
+			name: "memory below emulator minimum",
+			env: map[string]string{
+				"ADBTEST_APK":       apkPath,
+				"ADBTEST_AVD":       "small_phone_api_34",
+				"ADBTEST_MEMORY_MB": "1024",
+			},
+			want: "ADBTEST_MEMORY_MB",
+		},
+		{
+			name: "AVD resource with serial",
+			env: map[string]string{
+				"ADBTEST_APK":    apkPath,
+				"ADBTEST_SERIAL": "emulator-5554",
+				"ADBTEST_CORES":  "2",
+			},
+			want: "only valid with ADBTEST_AVD",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, _, _, err := loadExampleEnvironment(mapEnvironment(test.env))
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("loadExampleEnvironment() error = %v, want containing %q", err, test.want)
+			}
+		})
+	}
+}
+
 func loadExampleEnvironment(getenv func(string) string) (adbtest.Config, fixtureConfig, string, error) {
 	value := func(name string) string {
 		return strings.TrimSpace(getenv(name))
@@ -200,19 +302,9 @@ func loadExampleEnvironment(getenv func(string) string) (adbtest.Config, fixture
 	resultSelector := value("ADBTEST_RESULT_SELECTOR")
 	expectedText := value("ADBTEST_EXPECTED_TEXT")
 
-	missing := make([]string, 0, 5)
-	for _, required := range []struct {
-		name       string
-		configured bool
-	}{
-		{name: "ADBTEST_APK", configured: apk != ""},
-		{name: "ADBTEST_PERMISSION_TRIGGER_SELECTOR", configured: triggerSelector != ""},
-		{name: "ADBTEST_RESULT_SELECTOR", configured: resultSelector != ""},
-		{name: "ADBTEST_EXPECTED_TEXT", configured: expectedText != ""},
-	} {
-		if !required.configured {
-			missing = append(missing, required.name)
-		}
+	missing := make([]string, 0, 2)
+	if apk == "" {
+		missing = append(missing, "ADBTEST_APK")
 	}
 	if avd == "" && serial == "" {
 		missing = append(missing, "ADBTEST_AVD or ADBTEST_SERIAL")
@@ -227,6 +319,18 @@ func loadExampleEnvironment(getenv func(string) string) (adbtest.Config, fixture
 		)
 	}
 
+	permissionValues := 0
+	for _, configured := range []bool{triggerSelector != "", resultSelector != "", expectedText != ""} {
+		if configured {
+			permissionValues++
+		}
+	}
+	if permissionValues != 0 && permissionValues != 3 {
+		return adbtest.Config{}, fixtureConfig{}, "", fmt.Errorf(
+			"permission-flow variables must be set together: ADBTEST_PERMISSION_TRIGGER_SELECTOR, ADBTEST_RESULT_SELECTOR, and ADBTEST_EXPECTED_TEXT",
+		)
+	}
+
 	info, err := os.Stat(apk)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -238,7 +342,7 @@ func loadExampleEnvironment(getenv func(string) string) (adbtest.Config, fixture
 		return adbtest.Config{}, fixtureConfig{}, "", fmt.Errorf("ADBTEST_APK %q is not a regular file", apk)
 	}
 
-	interactionTimeout, err := positiveDuration(value("ADBTEST_INTERACTION_TIMEOUT"), 15*time.Second)
+	interactionTimeout, err := positiveDuration(value("ADBTEST_INTERACTION_TIMEOUT"), 30*time.Second)
 	if err != nil {
 		return adbtest.Config{}, fixtureConfig{}, "", fmt.Errorf("ADBTEST_INTERACTION_TIMEOUT: %w", err)
 	}
@@ -254,9 +358,12 @@ func loadExampleEnvironment(getenv func(string) string) (adbtest.Config, fixture
 	if err != nil {
 		return adbtest.Config{}, fixtureConfig{}, "", fmt.Errorf("ADBTEST_CDP_PORT: %w", err)
 	}
+	filePickerEnabled, err := boolWithDefault(value("ADBTEST_FILE_PICKER"), false)
+	if err != nil {
+		return adbtest.Config{}, fixtureConfig{}, "", fmt.Errorf("ADBTEST_FILE_PICKER: %w", err)
+	}
 
 	config := adbtest.Config{
-		AVD:         avd,
 		Serial:      serial,
 		APK:         apk,
 		AppPackage:  value("ADBTEST_APP_PACKAGE"),
@@ -267,26 +374,48 @@ func loadExampleEnvironment(getenv func(string) string) (adbtest.Config, fixture
 		CDPPort:     cdpPort,
 	}
 	if avd != "" {
-		config.GPU = value("ADBTEST_GPU")
-		config.Headless, err = optionalBool(value("ADBTEST_HEADLESS"))
+		config = adbtest.HeadlessAVD(avd, apk)
+		config.AppPackage = value("ADBTEST_APP_PACKAGE")
+		config.AppProcess = value("ADBTEST_APP_PROCESS")
+		config.AppActivity = value("ADBTEST_APP_ACTIVITY")
+		config.BootTimeout = bootTimeout
+		config.AppTimeout = appTimeout
+		config.CDPPort = cdpPort
+		if gpu := value("ADBTEST_GPU"); gpu != "" {
+			config.GPU = gpu
+		}
+		config.Cores, err = intWithDefault(value("ADBTEST_CORES"), config.Cores, 0, 64)
+		if err != nil {
+			return adbtest.Config{}, fixtureConfig{}, "", fmt.Errorf("ADBTEST_CORES: %w", err)
+		}
+		config.MemoryMB, err = intWithDefault(value("ADBTEST_MEMORY_MB"), config.MemoryMB, 0, 8192)
+		if err != nil {
+			return adbtest.Config{}, fixtureConfig{}, "", fmt.Errorf("ADBTEST_MEMORY_MB: %w", err)
+		}
+		if config.MemoryMB != 0 && config.MemoryMB < 1536 {
+			return adbtest.Config{}, fixtureConfig{}, "", fmt.Errorf("ADBTEST_MEMORY_MB: must be zero or at least 1536")
+		}
+		config.Headless, err = boolWithDefault(value("ADBTEST_HEADLESS"), config.Headless)
 		if err != nil {
 			return adbtest.Config{}, fixtureConfig{}, "", fmt.Errorf("ADBTEST_HEADLESS: %w", err)
 		}
-		config.NoAudio, err = optionalBool(value("ADBTEST_NO_AUDIO"))
+		config.NoAudio, err = boolWithDefault(value("ADBTEST_NO_AUDIO"), config.NoAudio)
 		if err != nil {
 			return adbtest.Config{}, fixtureConfig{}, "", fmt.Errorf("ADBTEST_NO_AUDIO: %w", err)
 		}
-		config.WipeData, err = optionalBool(value("ADBTEST_WIPE_DATA"))
+		config.WipeData, err = boolWithDefault(value("ADBTEST_WIPE_DATA"), config.WipeData)
 		if err != nil {
 			return adbtest.Config{}, fixtureConfig{}, "", fmt.Errorf("ADBTEST_WIPE_DATA: %w", err)
 		}
-		config.NoSnapshot, err = optionalBool(value("ADBTEST_NO_SNAPSHOT"))
+		config.NoSnapshot, err = boolWithDefault(value("ADBTEST_NO_SNAPSHOT"), config.NoSnapshot)
 		if err != nil {
 			return adbtest.Config{}, fixtureConfig{}, "", fmt.Errorf("ADBTEST_NO_SNAPSHOT: %w", err)
 		}
 	} else {
 		for _, name := range []string{
 			"ADBTEST_GPU",
+			"ADBTEST_CORES",
+			"ADBTEST_MEMORY_MB",
 			"ADBTEST_HEADLESS",
 			"ADBTEST_NO_AUDIO",
 			"ADBTEST_WIPE_DATA",
@@ -303,6 +432,7 @@ func loadExampleEnvironment(getenv func(string) string) (adbtest.Config, fixture
 		resultSelector:            resultSelector,
 		expectedText:              expectedText,
 		interactionTimeout:        interactionTimeout,
+		filePickerEnabled:         filePickerEnabled,
 	}, "", nil
 }
 
@@ -341,9 +471,23 @@ func optionalPort(raw string) (int, error) {
 	return port, nil
 }
 
-func optionalBool(raw string) (bool, error) {
+func intWithDefault(raw string, defaultValue, minimum, maximum int) (int, error) {
 	if raw == "" {
-		return false, nil
+		return defaultValue, nil
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, err
+	}
+	if value < minimum || value > maximum {
+		return 0, fmt.Errorf("must be between %d and %d", minimum, maximum)
+	}
+	return value, nil
+}
+
+func boolWithDefault(raw string, defaultValue bool) (bool, error) {
+	if raw == "" {
+		return defaultValue, nil
 	}
 	value, err := strconv.ParseBool(raw)
 	if err != nil {

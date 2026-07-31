@@ -18,10 +18,13 @@ jobs:
       ADBTEST_APP_PACKAGE: com.example.app
       # ADBTEST_APP_PROCESS: :webview # Uncomment for a secondary WebView process.
       ADBTEST_APP_ACTIVITY: .MainActivity
-      ADBTEST_PERMISSION_TRIGGER_SELECTOR: "#request-permission"
-      ADBTEST_RESULT_SELECTOR: "#permission-status"
-      ADBTEST_EXPECTED_TEXT: granted
-      ADBTEST_INTERACTION_TIMEOUT: 20s
+      ADBTEST_APP_TIMEOUT: 2m
+      # ADBTEST_FILE_PICKER: "true" # Requires WebView file-chooser support.
+      # Set all three to enable the optional runtime-permission example:
+      # ADBTEST_PERMISSION_TRIGGER_SELECTOR: "#request-permission"
+      # ADBTEST_RESULT_SELECTOR: "#permission-status"
+      # ADBTEST_EXPECTED_TEXT: granted
+      ADBTEST_INTERACTION_TIMEOUT: 30s
 
     steps:
       - name: Check out source
@@ -39,20 +42,32 @@ jobs:
           ./gradlew assembleDebug
           test -f "$ADBTEST_APK"
 
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
       - name: Run Android integration suite
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 35
           arch: x86_64
+          target: google_apis
+          profile: small_phone
+          cores: 2
           emulator-options: >-
             -no-window
-            -gpu software
+            -gpu auto
             -no-audio
             -no-boot-anim
+            -no-snapshot
           script: |
             serial="$(adb devices | awk 'NR > 1 && $2 == "device" { print $1; exit }')"
             test -n "$serial"
             ADBTEST_SERIAL="$serial" go test \
+              -p=1 \
               -tags=android_integration \
               -count=1 \
               -timeout=10m \
