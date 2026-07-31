@@ -30,15 +30,10 @@ import (
 var device *adbtest.Device
 
 func TestMain(m *testing.M) {
-    device = adbtest.Setup(adbtest.Config{
-        AVD:        "Pixel_7",
-        APK:        "bin/myapp.apk",
-        AppPackage: "com.example.myapp",
-        Headless:   true,
-        GPU:        "software",
-        NoAudio:    true,
-        NoSnapshot: true,
-    })
+    config := adbtest.HeadlessAVD("small_phone_api_34", "bin/myapp.apk")
+    config.AppPackage = "com.example.myapp"
+    config.AppTimeout = 2 * time.Minute
+    device = adbtest.Setup(config)
 
     code := m.Run()
     if err := device.Teardown(); err != nil {
@@ -82,33 +77,38 @@ single `Device`.
 
 ```go
 type Config struct {
-    AVD         string
-    Serial      string
-    APK         string
-    AppPackage  string
-    AppProcess  string
-    AppActivity string
-    Headless    bool
-    GPU         string
-    NoAudio     bool
-    WipeData    bool
-    NoSnapshot  bool
-    BootTimeout time.Duration
-    AppTimeout  time.Duration
-    CDPPort     int
+    AVD          string
+    Serial       string
+    APK          string
+    AppPackage   string
+    AppProcess   string
+    AppActivity  string
+    Headless     bool
+    GPU          string
+    Cores        int
+    MemoryMB     int
+    Acceleration string
+    NoAudio      bool
+    WipeData     bool
+    NoSnapshot   bool
+    BootTimeout  time.Duration
+    AppTimeout   time.Duration
+    CDPPort      int
 }
 ```
 
 Exactly one of `AVD` and `Serial` is required:
 
-- `AVD` starts a new emulator. The returned `Device` owns and stops it.
+- `AVD` starts an existing configured emulator. The returned `Device` owns and
+  stops it; Setup does not download an image or create an AVD.
 - `Serial` attaches to an existing emulator or physical device. The returned
   `Device` never stops that device, and `Device.Emulator` is `nil`.
 
 The library never implicitly chooses the first connected device. `Headless`,
-`GPU`, `NoAudio`, `WipeData`, and `NoSnapshot` apply only in AVD mode and are
-rejected in attached mode. `NoSnapshot` passes the emulator's `-no-snapshot`
-option, forcing a cold boot and disabling automatic snapshot saving.
+`GPU`, `Cores`, `MemoryMB`, `Acceleration`, `NoAudio`, `WipeData`, and
+`NoSnapshot` apply only in AVD mode and are rejected in attached mode.
+`NoSnapshot` passes the emulator's `-no-snapshot` option, forcing a cold boot
+and disabling automatic snapshot saving.
 
 Boolean fields retain normal Go zero-value semantics: `false` remains false.
 There are no hidden `true` defaults. The non-boolean zero-value defaults are:
@@ -116,6 +116,9 @@ There are no hidden `true` defaults. The non-boolean zero-value defaults are:
 | Field | Default |
 | --- | --- |
 | `GPU` | `auto` in AVD mode |
+| `Cores` | AVD setting |
+| `MemoryMB` | AVD/system-image setting |
+| `Acceleration` | Emulator default |
 | `BootTimeout` | 120 seconds |
 | `AppTimeout` | 30 seconds |
 | `CDPPort` | 9222 |
@@ -152,6 +155,14 @@ pm resolve-activity --brief \
 Set `AppActivity` explicitly for the most predictable behavior on older Android
 releases, whose package-manager command output is less consistent.
 
+`HeadlessAVD(avd, apk)` is an additive convenience constructor. It selects
+headless mode, GPU auto-selection, two virtual CPUs, required VM acceleration,
+no audio, and no snapshot load/save while leaving `WipeData` false and memory
+image-managed. Requiring acceleration fails startup if the host hypervisor is
+unusable instead of permitting CPU emulation. Callers can override fields
+before Setup. `MemoryMB` accepts zero or 1536–8192 MB, but modern system images
+can enforce a higher safe minimum.
+
 ### Device API
 
 ```go
@@ -165,6 +176,7 @@ type Device struct {
 }
 
 func Setup(cfg Config) *Device
+func HeadlessAVD(avd, apk string) Config
 func (d *Device) Teardown() error
 func (d *Device) ForceStop() error
 func (d *Device) LaunchApp(t testing.TB)
@@ -196,9 +208,14 @@ Forwarding uses `adb forward --no-rebind`; an existing mapping for `CDPPort`
 causes setup to fail rather than being replaced. Cleanup removes a forward only
 after this client successfully created and recorded it.
 
-`LaunchApp` launches the resolved component but does not reconnect CDP.
-`RestartApp` force-stops, launches, and reconnects CDP within `AppTimeout`.
-Force-stopping does not clear application data.
+Activity Manager can return `Status: timeout` from `am start -W` after it has
+accepted a launch but stopped waiting for the first rendered frame. That status
+is advisory: Setup and RestartApp continue to CDP connection/reconnection,
+which is the readiness proof. Explicit command errors and unknown statuses are
+fatal. `LaunchApp` only requests the resolved component launch; it does not
+establish readiness or reconnect CDP. `RestartApp` force-stops, launches, and
+reconnects CDP within `AppTimeout`. Force-stopping does not clear application
+data.
 
 `Teardown` is nil-safe and idempotent. It closes CDP/removes its ADB forward,
 force-stops an app launched by the device, and kills an owned emulator. It
@@ -252,13 +269,16 @@ the device state changes.
 
 ```go
 type Config struct {
-    AVD        string
-    Headless   bool
-    GPU        string
-    NoAudio    bool
-    WipeData   bool
-    NoSnapshot bool
-    Timeout    time.Duration
+    AVD          string
+    Headless     bool
+    GPU          string
+    Cores        int
+    MemoryMB     int
+    Acceleration string
+    NoAudio      bool
+    WipeData     bool
+    NoSnapshot   bool
+    Timeout      time.Duration
 }
 
 type Instance struct {
@@ -274,7 +294,11 @@ func (i *Instance) IsRunning() bool
 ```
 
 `AVD` is required. A zero timeout becomes 120 seconds; a negative timeout is
-rejected. Boolean fields remain false unless explicitly enabled.
+rejected. `Cores` accepts zero (the AVD setting) or 1–64. `MemoryMB` accepts
+zero (the AVD/system-image setting) or 1536–8192. `Acceleration` accepts empty,
+`auto`, `on`, or `off`; non-empty values pass `-accel`. Boolean fields remain
+false unless explicitly enabled. Non-zero resource values pass `-cores` and
+`-memory` to the emulator.
 
 Start first obtains a checked baseline from `adb devices`, launches the
 emulator, and detects the new serial by comparing device lists. Serial
@@ -494,7 +518,7 @@ Consumer tests requiring Android should use:
 ```
 
 ```sh
-go test -tags android_integration -timeout 5m ./...
+go test -p=1 -tags android_integration -timeout 5m ./...
 ```
 
 When an external runner already owns an emulator, configure root Setup with
@@ -515,6 +539,8 @@ their own assertion library; `testify` is not a module dependency.
 - Android shell output is trimmed, including CRLF output.
 - A wiped AVD and a cold WebView may take significantly longer to initialize;
   configure timeouts rather than adding sleeps.
+- Run owned-AVD packages with `-p=1`. Prefer a 720×1280 non-Play-Store
+  `google_apis` x86_64 AVD with two cores; software graphics consume host CPU.
 - `NoAudio: true` improves emulator stability but prevents successful audio
   capture even when the Android permission is granted.
 - CDP clicks use CSS pixels; no device-pixel-ratio multiplication is needed.

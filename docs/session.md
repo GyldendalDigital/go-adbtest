@@ -6,14 +6,14 @@ result.
 
 ## Final Local Checkpoint — 2026-07-31
 
-- M0 remains the pushed remote baseline; M1 through M8 are complete in focused
+- M0 remains the pushed remote baseline; M1 through M9 are complete in focused
   local commits on `master`.
 - The complete race, vet, lint, build, Windows cross-build, module, formatting,
-  tagged-example, and vulnerability checks pass.
+  tagged-example, YAML, and vulnerability checks pass after the host follow-up.
 - No commit from the recovered implementation session has been pushed.
-- Real Android execution was initially recorded as external because the
-  workspace sandbox exposed no SDK, emulator, `adb`, `aapt`, or fixture. The
-  host discovery below corrects that boundary.
+- Android tooling was initially recorded as absent because it was outside the
+  workspace sandbox. The host discovery and partial live validation below
+  correct that boundary.
 
 ## Host Android Follow-up — 2026-07-31
 
@@ -24,15 +24,41 @@ workspace sandbox. Read-only host discovery found:
 - AVDs: `Medium_35`, `Medium_Phone_API_36.0`, and `Pixel_7`;
 - existing runbook: `ordnett_pluss_v4/scripts/android-run.sh`, defaulting to
   `Medium_Phone_API_36.0`;
-- debuggable x86_64 APK: `ordnett_pluss_v4/bin/ordnett_pluss_v4.apk` (also
-  present in Gradle debug outputs), package `no.gyldendal.ordnett`, launch
-  activity `com.wails.app.MainActivity`.
+- debuggable x86_64 APK:
+  `ordnett_pluss_v4/build/android/app/build/outputs/apk/debug/app-debug.apk`,
+  package `no.gyldendal.ordnett`, launch activity
+  `com.wails.app.MainActivity`.
 
-No emulator is currently running. The next action is a real owned-AVD smoke of
-root setup/teardown, UI hierarchy access, CDP evaluation, and restart/reconnect.
-The application source has no identified deterministic DOM control that
-requests a runtime permission, so the generic permission-flow example remains
-separate unless live inspection reveals such a control.
+The live validation produced useful but deliberately bounded results:
+
+- A first `Medium_Phone_API_36.0` quickboot exposed the missing root
+  `NoSnapshot` option. A subsequent snapshot-free run completed the full root
+  smoke once: owned lifecycle, install/launch, UI hierarchy access, CDP
+  evaluation, restart/reconnect, and teardown all passed. It nevertheless
+  caused unacceptable host lag.
+- `Pixel_7` cold-booted with the known headless profile. One attempt reached the
+  app but a UI dump exhausted its 10-second bound. A later attempt received
+  Android's soft `Status: timeout` from `am start -W`; launch now treats that as
+  pending rather than fatal and requires CDP readiness to prove the app usable.
+- Both emulators were cleaned up. No emulator was left running.
+- The planned DocumentsUI three-file selection roundtrip was not completed.
+  Even `Pixel_7` caused enough lag that the user stopped further live runs, so
+  this session must not claim an end-to-end file-picker pass.
+
+Host pressure explains why the existing AVDs are unsuitable as a default CI
+fixture: only about 4.2 GiB of memory was available, the full 2 GiB swap was in
+use, and the `Pixel_7` API 34 image forced 2560 MiB of guest RAM. The lightweight
+library profile therefore keeps the emulator headless, disables audio,
+animations, and snapshots, caps virtual CPUs at two, requires VM acceleration,
+uses emulator-managed GPU selection, and leaves guest memory to the AVD/image
+instead of layering another override on the command line. Requiring acceleration
+fails fast instead of silently falling back to CPU emulation. `Setup` starts and
+owns an already configured AVD; it does not download a system image or
+create/provision an AVD.
+
+For a later live validation, create a dedicated non-Play `small_phone` AVD with
+a 720x1280 display and a `google_apis` x86_64 image. Run only that AVD, serially,
+and do not repeat live execution in this session.
 
 ## Recovery Checkpoint — 2026-07-31
 
@@ -80,9 +106,9 @@ socket/forward ownership, current emulator GPU defaults, and all lint findings.
 3. App launch uses APK metadata or generic package-manager activity resolution,
    with no Wails-specific assumption; callers can set `AppActivity` explicitly.
 4. Root setup supports both an owned `AVD` and an explicit attached `Serial`.
-5. There is no Android SDK, `adb`, emulator, or `aapt` available in this local
-   environment. Unit behavior must be covered with fakes; real Android
-   integration remains an explicitly recorded external validation step.
+5. Android SDK tools were not visible inside the initial workspace sandbox but
+   do exist on the host. Deterministic unit behavior remains covered with fakes;
+   host execution is a separate, resource-sensitive validation step.
 6. Recovery review found three blockers in already committed code: normal
    `/dev/tty` UI dumps included trailing status text that broke XML parsing;
    CDP protocol/disconnect failures were reported as success; and CDP HTTP
@@ -99,7 +125,7 @@ socket/forward ownership, current emulator GPU defaults, and all lint findings.
 | 2026-07-31 | Reconstructed git state, plans, instructions, and public spec | Found four local commits and unfinished untracked permissions files |
 | 2026-07-31 | Ran `go test -count=1 ./...` | Failed only because the recovered permissions test does not compile |
 | 2026-07-31 | Ran `go vet ./...` | Failed at the same permissions test compile error |
-| 2026-07-31 | Checked Android tooling | No local SDK tools or Android environment variables found |
+| 2026-07-31 | Checked sandbox-visible Android tooling | No SDK tools or Android environment variables were exposed inside the initial sandbox; later host discovery corrected this boundary |
 | 2026-07-31 | Committed recovery plan | Local commit `2037f27`; nothing pushed |
 | 2026-07-31 | Ran five-specialist recovery audit | Added focused UI, CDP, and adb/emulator stabilization tasks before root composition |
 | 2026-07-31 | Completed M5 permission handling | Race tests pass; controller filtering, API variants, errors, dialog races, sequential grants, and safety cap are covered |
@@ -113,10 +139,21 @@ socket/forward ownership, current emulator GPU defaults, and all lint findings.
 | 2026-07-31 | Hardened CDP process/socket selection and ownership | Commit `820400d` adds explicit `AppProcess`, all-PID socket discovery, exclusive owned forwards, bounded evaluation/waits, and the maintained WebSocket dependency |
 | 2026-07-31 | Closed static/CI findings | Commit `9019bb5` leaves golangci-lint at zero findings and compile-checks the tagged example in the required CI job |
 | 2026-07-31 | Ran final local validation | Race tests, vet, lint, native and Windows builds, module tidy/verify, formatting/diff checks, tagged example, and govulncheck all pass |
-| 2026-07-31 | Recorded external validation boundary | A real APK/emulator smoke test could not run because Android tooling and a fixture are absent; no local unit or static check remains blocked |
+| 2026-07-31 | Recorded initial external validation boundary | Android tooling was unavailable inside the sandbox; later host discovery superseded the claim that it was absent from the machine |
+| 2026-07-31 | Discovered host Android fixture | Found SDK 37.0.0, three existing AVDs, and a debuggable x86_64 WebView APK outside the workspace sandbox |
+| 2026-07-31 | Ran snapshot-free Medium API 36 root smoke | Owned boot/install/launch, UI, CDP, restart/reconnect, and teardown passed once, but the AVD caused unacceptable host lag |
+| 2026-07-31 | Bounded Pixel_7 validation | Cold boot succeeded; one run timed out during UI dump and another returned a soft launch timeout. Both emulators were cleaned up and further live runs were stopped |
+| 2026-07-31 | Exposed snapshot-free root setup | Commit `b418420` passes `NoSnapshot` through the root API so owned runs can avoid unstable quickboot state |
+| 2026-07-31 | Hardened delayed app launch | Commit `a2522ef` accepts Activity Manager's advisory `Status: timeout` while CDP remains the bounded readiness proof |
+| 2026-07-31 | Added constrained owned-AVD profile | Commit `e503bb0` adds `HeadlessAVD`, a two-core cap, GPU auto-selection, optional RAM override, and root/emulator pass-through tests |
+| 2026-07-31 | Prevented unaccelerated safe-profile boots | Commit `6efa95b` exposes validated acceleration modes and makes `HeadlessAVD` use `-accel on`, failing fast without a usable hypervisor |
+| 2026-07-31 | Added lightweight cross-boundary example | Commit `3999a1c` keeps lifecycle/CDP always on, makes DocumentsUI and permissions opt-in, uses unique fixtures, and supplies a small-phone serial CI template |
+| 2026-07-31 | Completed final M9 validation | Full race, vet, lint (normal and tagged), builds, module checks, tagged example, YAML parsing, diff checks, and govulncheck pass; no emulator was started |
 
 ## Next Action
 
-The initial local build is complete. Review the local commits, then run the
-consumer example against a real debuggable WebView APK on an Android emulator or
-device. Push, PR creation, or other GitHub changes require a new user request.
+Review the complete local commit series; keep it unpushed until the user asks.
+Do not start another existing host AVD in this session. A future integration
+run should first provision the dedicated 720x1280 `small_phone`, non-Play
+`google_apis` x86_64 AVD described above, then run the suite serially. Push, PR
+creation, or other GitHub changes require a new user request.

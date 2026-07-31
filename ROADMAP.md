@@ -2,8 +2,10 @@
 
 Checked items below are implemented in local commits. The feature build,
 examples, documentation, council review, and local release validation are
-complete. Real Android execution remains an external follow-up because this
-host has no SDK, emulator, or application fixture. Detailed status lives in
+complete through Phase 9. Host Android tooling and a debuggable fixture were
+later found outside the initial workspace sandbox; Phase 9 bounded live work
+when the existing AVDs caused unacceptable host pressure. Detailed status
+lives in
 [docs/work-breakdown.md](docs/work-breakdown.md) and
 [docs/session.md](docs/session.md).
 
@@ -19,10 +21,13 @@ host has no SDK, emulator, or application fixture. Detailed status lives in
 ## Phase 2: Emulator Lifecycle — `emulator/` package
 > Boot, monitor, and kill emulators.
 
-- [x] `Config` struct with AVD, GPU, headless, wipe options
+- [x] `Config` struct with AVD, GPU, headless, audio, snapshot, wipe, and
+  resource options
 - [x] `Start` — launch emulator process, detect serial
 - [x] `WaitForBoot` — poll `sys.boot_completed`
 - [x] `Kill` — graceful shutdown with SIGKILL fallback
+- [x] Lightweight headless profile with two virtual CPUs, required
+  acceleration, and image-managed memory
 - [x] Unit tests
 
 ## Phase 3: Native UI — `ui/` package
@@ -53,10 +58,12 @@ host has no SDK, emulator, or application fixture. Detailed status lives in
 ## Phase 6: Top-level API — `testkit.go`
 > Compose all packages into the `Device` handle.
 
-- [x] `Setup` — start an AVD or attach by serial, install, launch, connect CDP
+- [x] `Setup` — start an existing configured AVD or attach by serial, install,
+  launch, connect CDP
 - [x] `Teardown`, `RestartApp`, `ForceStop`
 - [x] `Config` with sensible defaults
 - [x] Explicit secondary-process WebView selection
+- [x] Explicit boundary: AVD/system-image provisioning remains consumer-owned
 - [x] Integration test example
 
 ## Phase 7: Examples & Documentation
@@ -72,7 +79,24 @@ host has no SDK, emulator, or application fixture. Detailed status lives in
 - [x] Go, Android, CDP, test-infrastructure, and code-quality review
 - [x] Full race, vet, lint, build, module, formatting, and vulnerability checks
 - [x] SDK-free tagged example check in required CI
-- [x] External Android validation boundary recorded
+- [x] Initial Android sandbox boundary recorded and later corrected by host discovery
+
+## Phase 9: Host Smoke & Constrained Emulator Profile
+> Validate the root lifecycle without making a phone-sized emulator the
+> library's CI default.
+
+- [x] Discover host SDK, AVDs, and debuggable x86_64 WebView APK
+- [x] Expose snapshot-free root setup after quickboot revealed the missing option
+- [x] Pass one snapshot-free Medium API 36 root lifecycle/UI/CDP/reconnect smoke
+- [x] Stop live validation after Medium and Pixel_7 AVDs caused unacceptable host lag
+- [x] Treat `am start -W` soft status timeout as pending bounded CDP readiness
+- [x] Keep the public headless profile lightweight: no window/audio/boot
+  animation/snapshots, two CPUs, required VM acceleration, automatic GPU, and
+  image-managed memory
+- [x] Record that the native DocumentsUI multi-file roundtrip did not complete
+- [x] Recommend a 720x1280 non-Play `small_phone` `google_apis` x86_64 AVD for
+  later serial CI validation
+- [x] Re-run deterministic unit/static checks and create focused local commits
 
 ---
 

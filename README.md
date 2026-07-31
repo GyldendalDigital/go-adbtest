@@ -36,15 +36,10 @@ import (
 var device *adbtest.Device
 
 func TestMain(m *testing.M) {
-    device = adbtest.Setup(adbtest.Config{
-        AVD:        "Pixel_7",
-        APK:        "bin/myapp.apk",
-        AppPackage: "com.example.myapp",
-        Headless:   true,
-        GPU:        "software",
-        NoAudio:    true,
-        NoSnapshot: true,
-    })
+    config := adbtest.HeadlessAVD("small_phone_api_34", "bin/myapp.apk")
+    config.AppPackage = "com.example.myapp"
+    config.AppTimeout = 2 * time.Minute // Useful for slow Go/WebView startup.
+    device = adbtest.Setup(config)
 
     code := m.Run()
     if err := device.Teardown(); err != nil {
@@ -77,13 +72,14 @@ explicitly.
 
 Exactly one device mode is required:
 
-- `AVD` starts an emulator owned by the `Device`. `Teardown` stops it.
+- `AVD` starts an existing configured emulator owned by the `Device`.
+  `Teardown` stops it. Setup does not download an image or create the AVD.
 - `Serial` attaches to an already-running emulator or device. `Teardown`
   closes CDP and force-stops the launched app, but does not stop that device.
 
 Selection is always explicit; `Setup` never guesses among connected devices.
-AVD-only fields (`Headless`, `GPU`, `NoAudio`, `WipeData`, and `NoSnapshot`)
-must not be set with `Serial`.
+AVD-only fields (`Headless`, `GPU`, `Cores`, `MemoryMB`, `Acceleration`,
+`NoAudio`, `WipeData`, and `NoSnapshot`) must not be set with `Serial`.
 
 The zero value of every boolean remains `false`. Set `Headless: true` and
 `NoAudio: true` explicitly when desired. Other zero values receive these
@@ -92,14 +88,39 @@ defaults:
 | Field | Default |
 | --- | --- |
 | `GPU` | `auto` in AVD mode |
+| `Cores` | AVD setting |
+| `MemoryMB` | AVD/system-image setting |
+| `Acceleration` | Emulator default |
 | `BootTimeout` | 120 seconds |
 | `AppTimeout` | 30 seconds |
 | `CDPPort` | 9222 |
 
-For a conservative headless CI profile, set `Headless: true`,
-`GPU: "software"`, `NoAudio: true`, and `NoSnapshot: true`. `NoSnapshot`
-forces a cold boot and prevents a failed run from saving unstable quick-boot
-state.
+`HeadlessAVD` wraps the conservative owned-emulator profile: headless, GPU
+auto-selection, two virtual CPUs, required VM acceleration, no audio, no
+snapshot load/save, and no data wipe. Requiring acceleration makes an
+unsuitable host fail fast instead of falling back to expensive CPU emulation.
+It leaves RAM to the AVD/system image because
+[current Android phone images can enforce a higher safe minimum](https://android.googlesource.com/platform/external/qemu/+/emu-master-dev/android/android-emu/android/main-common.c#1250)
+than a command-line override.
+`NoSnapshot` forces a cold boot and prevents a failed run from saving unstable
+quick-boot state.
+
+For the lowest practical footprint, create the AVD itself with a small phone
+profile (for example 720×1280), a non-Play-Store `google_apis` x86_64 image,
+and hardware virtualization. Software graphics move rendering work onto the
+CPU, so `GPU: "auto"` is the best general default; use current
+`GPU: "swiftshader"` only when a graphics-less runner needs deterministic
+software rendering. `swiftshader_indirect` is deprecated. `MemoryMB` is an
+advanced 1536–8192 MB override, not a guaranteed host-memory ceiling.
+[Android recommends GPU auto-selection and VM acceleration](https://developer.android.com/studio/run/emulator-acceleration).
+The one-time `sdkmanager`/`avdmanager` recipe is in the
+[integration example](examples/README.md#device-modes).
+
+Run one owned emulator per suite. If Android tests span several Go packages,
+use `go test -p=1` so package-level `TestMain` functions cannot boot AVDs in
+parallel. [Automated Test Device images](https://developer.android.com/studio/test/managed-devices#use-atd)
+can be smaller, but remove components such as SystemUI and Settings; that makes
+them unsuitable as the default for permission-dialog and DocumentsUI tests.
 
 `APK` is always required. `AppPackage` may be omitted when Android `aapt` is
 available; package inspection happens before an emulator is started. `aapt`
@@ -123,7 +144,10 @@ DevTools sockets and reports ambiguous matches instead of guessing.
 Setup cleans up resources acquired before any later failure. `Teardown` is
 idempotent and continues cleanup after individual errors. App launch, PID
 discovery, port forwarding, target discovery, and CDP connection use bounded
-contexts rather than fixed sleeps. CDP forwarding is exclusive: `Setup` fails
+contexts rather than fixed sleeps. Activity Manager's `-W` initial-display
+timeout is advisory after Android accepts a launch; `Setup` and `RestartApp`
+use CDP connection/reconnection as the readiness proof. CDP forwarding is
+exclusive: `Setup` fails
 instead of replacing an existing mapping for `CDPPort`, and teardown removes
 only a mapping created by this library.
 
@@ -189,7 +213,7 @@ tag:
 ```
 
 ```sh
-go test -tags android_integration -timeout 5m ./...
+go test -p=1 -tags android_integration -timeout 5m ./...
 ```
 
 ## CI with an attached emulator
@@ -206,18 +230,27 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version: '1.23.x'
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
       - uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 35
           arch: x86_64
+          target: google_apis
+          profile: small_phone
+          cores: 2
           emulator-options: >-
-            -no-window -gpu software -no-audio -no-boot-anim
+            -no-window -gpu auto -accel on -no-audio -no-boot-anim -no-snapshot
           script: |
             ./your-android-build-command
             export ADBTEST_APK="$PWD/path/to/app.apk"
             export ADBTEST_SERIAL="$(adb devices | awk 'NR > 1 && $2 == "device" { print $1; exit }')"
             test -n "$ADBTEST_SERIAL"
-            go test -tags android_integration -timeout 5m ./...
+            go test -p=1 -tags android_integration -timeout 5m ./...
 ```
 
 `Setup` installs `ADBTEST_APK`; the CI build step should build it but need not

@@ -32,6 +32,7 @@ acceptance criteria, and recovery status.
 | M6 | Root `adbtest` device/testkit API | M1–M5C | Complete | `4497d83` |
 | M7 | Examples and public documentation | M6 | Complete | `67731ad`, `e1f5665`, `229ea36`, `99e6c1d` |
 | M8 | Cross-package council review and release-quality validation | M1–M7 | Complete locally | `31b3564`, `820400d`, `9019bb5` |
+| M9 | Host Android smoke and lightweight emulator profile | M8 | Complete locally; live run deliberately bounded | `b418420`, `a2522ef`, `e503bb0`, `3999a1c`, `6efa95b` |
 
 ## Task Specifications and Acceptance Criteria
 
@@ -67,8 +68,9 @@ Acceptance criteria:
 - Validate configuration before starting external processes.
 - Apply documented duration, GPU, and CDP-port defaults without hiding Go bool
   zero-value semantics.
-- Boot an AVD, install the APK, determine the application package when needed,
-  launch it, and connect UI/CDP helpers in dependency order.
+- Start an existing configured AVD, install the APK, determine the application
+  package when needed, launch it, and connect UI/CDP helpers in dependency
+  order. `Setup` does not download system images or create/provision AVDs.
 - Select the default or an explicit secondary Android process and discover its
   actual WebView DevTools socket without replacing an existing ADB forward.
 - Clean up every resource already acquired when a later setup step fails.
@@ -130,10 +132,51 @@ M8 passed locally on 2026-07-31: the full race suite, vet, golangci-lint, native
 build, Windows cross-build, module tidy and verification, formatting/diff
 checks, the SDK-free tagged example, and govulncheck all succeeded.
 
+### M9 — Host Android smoke and lightweight emulator profile
+
+Files: root/emulator configuration and tests, examples, and status documents.
+
+Host tooling was discovered outside the initial workspace sandbox. One
+snapshot-free `Medium_Phone_API_36.0` run passed the root-owned lifecycle, UI,
+CDP, restart/reconnect, and teardown smoke, but caused unacceptable host lag.
+Two `Pixel_7` attempts cold-booted with the known headless profile; one reached
+a bounded UI-dump timeout and the other returned a soft `am start -W` status
+timeout. Both emulators were cleaned up. The DocumentsUI multi-file roundtrip
+was not completed, and the user stopped further live execution because even
+the smaller attempt made the host lag.
+
+Acceptance criteria:
+
+- Offer a convenient headless AVD configuration that disables the window,
+  audio, boot animation, and snapshots, caps the emulator at two virtual CPUs,
+  selects GPU mode automatically, requires VM acceleration, and does not
+  override image-managed memory.
+- Keep raw configuration fields available when a consumer needs a current host
+  override such as `swiftshader`.
+- Treat `am start -W`'s `Status: timeout` as a soft launch result only while a
+  later bounded CDP connection remains responsible for proving readiness.
+- State clearly that the library starts and owns an existing AVD but does not
+  provision or download one.
+- Cover the behavior through deterministic unit and static validation. Do not
+  run another existing host AVD during this session.
+- Recommend a dedicated CI-oriented `small_phone` AVD: 720x1280,
+  `google_apis` x86_64, and non-Play. Run Android integration serially.
+- Do not claim the native DocumentsUI file-picker roundtrip passed.
+
+M9 passed deterministic validation on 2026-07-31: the full race suite, vet,
+lint (including the integration build tag), native and Windows builds, module
+tidiness/verification, tagged example tests, YAML parsing, formatting/diff
+checks, and govulncheck all succeeded. No emulator was started for this final
+pass.
+
 ## External Follow-up
 
-Run the copyable consumer example against a real debuggable WebView APK on the
-intended Android API matrix. This is not a local M8 failure: the current host
-does not have an Android SDK, emulator, `adb`, `aapt`, or an application fixture.
-Publishing the local commits is intentionally deferred until the user requests
-it.
+The host does have an Android SDK, emulator, and debuggable WebView fixture, but
+its existing phone AVDs are too resource-heavy for continued validation. At the
+time of the stopped runs only about 4.2 GiB was available, all 2 GiB of swap was
+in use, and the `Pixel_7` API 34 image forced 2560 MiB of guest RAM.
+
+Before retrying the copyable consumer/file-picker example, provision the
+dedicated 720x1280 non-Play `small_phone` AVD with a `google_apis` x86_64 image.
+Then run one emulator and the integration suite serially. Publishing the local
+commits remains intentionally deferred until the user requests it.
