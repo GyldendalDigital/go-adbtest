@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -73,6 +74,20 @@ func TestParseDump_InvalidXML(t *testing.T) {
 	}
 }
 
+func TestParseDump_InvalidBounds(t *testing.T) {
+	xmlData := `<hierarchy><node text="Danger" resource-id="button" bounds="not-bounds" /></hierarchy>`
+	elements, err := ParseDump([]byte(xmlData))
+	if err == nil {
+		t.Fatal("ParseDump() error = nil, want malformed bounds error")
+	}
+	if elements != nil {
+		t.Fatalf("ParseDump() elements = %v, want nil on malformed bounds", elements)
+	}
+	if !strings.Contains(err.Error(), `text="Danger"`) || !strings.Contains(err.Error(), "invalid bounds") {
+		t.Fatalf("ParseDump() error = %v, want element context and invalid bounds", err)
+	}
+}
+
 func TestRect_Center(t *testing.T) {
 	r := Rect{X1: 100, Y1: 200, X2: 300, Y2: 400}
 	if r.CenterX() != 200 {
@@ -91,6 +106,9 @@ func TestParseBounds(t *testing.T) {
 	}{
 		{"[0,0][1080,1920]", Rect{0, 0, 1080, 1920}, false},
 		{"[100,200][300,400]", Rect{100, 200, 300, 400}, false},
+		{"[-10,20][300,400]", Rect{-10, 20, 300, 400}, false},
+		{"[300,200][100,400]", Rect{}, true},
+		{"[999999999999999999999999,0][100,100]", Rect{}, true},
 		{"invalid", Rect{}, true},
 		{"", Rect{}, true},
 	}

@@ -2,6 +2,8 @@ package ui
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -103,28 +105,70 @@ func (u *Interactor) AssertGone(t testing.TB, text string) {
 func (u *Interactor) Dump() ([]Element, error) {
 	// Try fast path: dump to stdout via /dev/tty
 	out, err := u.ADB.Shell("uiautomator dump /dev/tty")
-	if err == nil && strings.Contains(out, "<hierarchy") {
-		// Strip any prefix before the XML
-		idx := strings.Index(out, "<?xml")
-		if idx < 0 {
-			idx = strings.Index(out, "<hierarchy")
+	var fastPathErr error
+	if err == nil {
+		xmlData, extractErr := hierarchyXML(out)
+		if extractErr == nil {
+			elements, parseErr := ParseDump(xmlData)
+			if parseErr == nil {
+				return elements, nil
+			}
+			fastPathErr = parseErr
+		} else {
+			fastPathErr = extractErr
 		}
-		if idx >= 0 {
-			return ParseDump([]byte(out[idx:]))
-		}
+	} else {
+		fastPathErr = err
 	}
 
-	// Fallback: dump to file, pull, parse
+	// Fallback: dump to a device file, pull it locally, and parse it there.
+	const remotePath = "/sdcard/ui.xml"
 	if _, err := u.ADB.Shell("uiautomator dump /sdcard/ui.xml"); err != nil {
-		return nil, fmt.Errorf("uiautomator dump: %w", err)
+		return nil, fmt.Errorf("uiautomator fallback dump: %w (fast path: %v)", err, fastPathErr)
 	}
-	out, err = u.ADB.Shell("cat /sdcard/ui.xml")
-	if err != nil {
-		return nil, fmt.Errorf("cat ui dump: %w", err)
-	}
-	_, _ = u.ADB.Shell("rm /sdcard/ui.xml")
+	defer func() {
+		_, _ = u.ADB.Shell("rm -f " + remotePath)
+	}()
 
-	return ParseDump([]byte(out))
+	tmpDir, err := os.MkdirTemp("", "go-adbtest-ui-")
+	if err != nil {
+		return nil, fmt.Errorf("create temporary directory for ui dump: %w", err)
+	}
+	defer func() {
+		_ = os.RemoveAll(tmpDir)
+	}()
+
+	localPath := filepath.Join(tmpDir, "ui.xml")
+	if err := u.ADB.Pull(remotePath, localPath); err != nil {
+		return nil, fmt.Errorf("pull ui dump: %w", err)
+	}
+	xmlData, err := os.ReadFile(localPath)
+	if err != nil {
+		return nil, fmt.Errorf("read pulled ui dump: %w", err)
+	}
+
+	elements, err := ParseDump(xmlData)
+	if err != nil {
+		return nil, fmt.Errorf("parse pulled ui dump: %w", err)
+	}
+	return elements, nil
+}
+
+// hierarchyXML extracts exactly one uiautomator hierarchy document. The
+// /dev/tty form normally appends a human-readable status line after the XML.
+func hierarchyXML(out string) ([]byte, error) {
+	start := strings.Index(out, "<hierarchy")
+	if start < 0 {
+		return nil, fmt.Errorf("ui dump did not contain <hierarchy>")
+	}
+
+	const closingTag = "</hierarchy>"
+	endOffset := strings.Index(out[start:], closingTag)
+	if endOffset < 0 {
+		return nil, fmt.Errorf("ui dump did not contain %s", closingTag)
+	}
+	end := start + endOffset + len(closingTag)
+	return []byte(out[start:end]), nil
 }
 
 // Tap sends an input tap at absolute coordinates.
@@ -135,10 +179,15 @@ func (u *Interactor) Tap(x, y int) error {
 
 // TypeText types text via `adb shell input text`.
 func (u *Interactor) TypeText(text string) error {
-	// Escape spaces for adb shell input
-	escaped := strings.ReplaceAll(text, " ", "%s")
-	_, err := u.ADB.Shell("input text " + escaped)
+	_, err := u.ADB.Shell("input text " + shellQuote(text))
 	return err
+}
+
+// shellQuote returns one POSIX-shell word. Android's shell accepts single
+// quotes, allowing spaces and shell metacharacters to reach `input text` as a
+// single literal argument.
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", `'\''`) + "'"
 }
 
 func (u *Interactor) tapElement(t testing.TB, el Element) {

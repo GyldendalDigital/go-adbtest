@@ -49,7 +49,7 @@ type xmlHierarchy struct {
 	Children []xmlNode `xml:"node"`
 }
 
-var boundsRegex = regexp.MustCompile(`\[(\d+),(\d+)\]\[(\d+),(\d+)\]`)
+var boundsRegex = regexp.MustCompile(`^\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]$`)
 
 // ParseDump parses uiautomator XML dump into a flat slice of Elements.
 func ParseDump(xmlData []byte) ([]Element, error) {
@@ -60,14 +60,19 @@ func ParseDump(xmlData []byte) ([]Element, error) {
 
 	var elements []Element
 	for _, node := range hierarchy.Children {
-		flattenNode(node, &elements)
+		if err := flattenNode(node, &elements); err != nil {
+			return nil, err
+		}
 	}
 	return elements, nil
 }
 
 // flattenNode recursively flattens the XML tree into a slice.
-func flattenNode(node xmlNode, elements *[]Element) {
-	bounds, _ := parseBounds(node.Bounds)
+func flattenNode(node xmlNode, elements *[]Element) error {
+	bounds, err := parseBounds(node.Bounds)
+	if err != nil {
+		return fmt.Errorf("parse bounds for element text=%q resource-id=%q: %w", node.Text, node.ResourceID, err)
+	}
 	*elements = append(*elements, Element{
 		Text:        node.Text,
 		ResourceID:  node.ResourceID,
@@ -78,8 +83,11 @@ func flattenNode(node xmlNode, elements *[]Element) {
 		Bounds:      bounds,
 	})
 	for _, child := range node.Children {
-		flattenNode(child, elements)
+		if err := flattenNode(child, elements); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
 // parseBounds parses a bounds string like "[0,0][1080,1920]" into a Rect.
@@ -88,10 +96,18 @@ func parseBounds(s string) (Rect, error) {
 	if len(matches) != 5 {
 		return Rect{}, fmt.Errorf("invalid bounds: %q", s)
 	}
-	x1, _ := strconv.Atoi(matches[1])
-	y1, _ := strconv.Atoi(matches[2])
-	x2, _ := strconv.Atoi(matches[3])
-	y2, _ := strconv.Atoi(matches[4])
+	values := make([]int, 4)
+	for i, value := range matches[1:] {
+		parsed, err := strconv.Atoi(value)
+		if err != nil {
+			return Rect{}, fmt.Errorf("invalid bounds coordinate %q in %q: %w", value, s, err)
+		}
+		values[i] = parsed
+	}
+	x1, y1, x2, y2 := values[0], values[1], values[2], values[3]
+	if x2 < x1 || y2 < y1 {
+		return Rect{}, fmt.Errorf("invalid bounds ordering: %q", s)
+	}
 	return Rect{X1: x1, Y1: y1, X2: x2, Y2: y2}, nil
 }
 

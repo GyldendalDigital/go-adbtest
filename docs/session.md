@@ -77,9 +77,9 @@ steps in `.github/instructions/*.instructions.md` for the initial build.
 | 2026-07-31 | Committed recovery plan | Local commit `2037f27`; nothing pushed |
 | 2026-07-31 | Ran five-specialist recovery audit | Added focused UI, CDP, and adb/emulator stabilization tasks before root composition |
 | 2026-07-31 | Completed M5 permission handling | Race tests pass; controller filtering, API variants, errors, dialog races, sequential grants, and safety cap are covered |
+| 2026-07-31 | Completed M5A UI stabilization | Fake-adb tests cover normal trailing dump status, pull fallback/cleanup, invalid bounds, and shell-safe text entry |
 
 ## Next Action
 
-Integrate and commit the focused M5A UI patch, then M5B CDP and M5C
-adb/emulator stabilization before starting root composition. Keep all work
-local.
+Integrate M5B CDP and M5C adb/emulator stabilization as focused commits before
+starting root composition. Keep all work local.
