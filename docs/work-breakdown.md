@@ -27,9 +27,9 @@ acceptance criteria, and recovery status.
 | M4 | `cdp/` WebView interaction | M1 | Implemented; final audit pending | `41abba5` |
 | M5 | `permissions/` dialog handling | M3 | Complete | `af43f5a` |
 | M5A | Critical `ui/` stabilization found by recovery audit | M3 | Complete | `63dc142` |
-| M5B | Critical `cdp/` connection/error stabilization found by recovery audit | M4 | Complete | Local M5B commit after `d6601d3` |
+| M5B | Critical `cdp/` connection/error stabilization found by recovery audit | M4 | Complete | `28473f5` |
 | M5C | Critical `adb/` and `emulator/` lifecycle stabilization found by recovery audit | M1–M2 | Complete | `d6601d3` |
-| M6 | Root `adbtest` device/testkit API | M1–M5C | In progress | — |
+| M6 | Root `adbtest` device/testkit API | M1–M5C | Complete | Local M6 commit after `28473f5` |
 | M7 | Examples and public documentation | M6 | Not started | — |
 | M8 | Cross-package council review and release-quality validation | M1–M7 | Not started | — |
 

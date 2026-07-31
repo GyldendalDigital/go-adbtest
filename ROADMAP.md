@@ -50,9 +50,9 @@ in [docs/work-breakdown.md](docs/work-breakdown.md) and
 ## Phase 6: Top-level API — `testkit.go`
 > Compose all packages into the `Device` handle.
 
-- [ ] `Setup` — boot emulator → install APK → launch app → connect CDP
-- [ ] `Teardown`, `RestartApp`, `ForceStop`
-- [ ] `Config` with sensible defaults
+- [x] `Setup` — boot emulator → install APK → launch app → connect CDP
+- [x] `Teardown`, `RestartApp`, `ForceStop`
+- [x] `Config` with sensible defaults
 - [ ] Integration test example
 
 ## Phase 7: Examples & Documentation

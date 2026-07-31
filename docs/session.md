@@ -80,8 +80,9 @@ steps in `.github/instructions/*.instructions.md` for the initial build.
 | 2026-07-31 | Completed M5A UI stabilization | Fake-adb tests cover normal trailing dump status, pull fallback/cleanup, invalid bounds, and shell-safe text entry |
 | 2026-07-31 | Completed M5C adb/emulator stabilization | Context-aware adb APIs, one boot deadline, early-exit reporting, correct host-side shutdown, idempotence, and process reaping are race-tested |
 | 2026-07-31 | Completed M5B CDP stabilization | Protocol/disconnect errors, concurrent routing/close, bounded discovery/readiness, forward cleanup, and visible-selector behavior are race-tested |
+| 2026-07-31 | Completed M6 root device API | AVD/attached modes, preflight discovery, activity resolution, bounded orchestration, cleanup ordering, restart, and idempotent teardown pass full race tests |
 
 ## Next Action
 
-Finish and verify M6 root composition against the stabilized packages, then
-create its focused local commit. Keep all work local.
+Implement M7 examples and reconcile public documentation/specification with
+the final API, then compile-check the example. Keep all work local.
