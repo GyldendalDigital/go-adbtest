@@ -98,6 +98,18 @@ lives in
   later serial CI validation
 - [x] Re-run deterministic unit/static checks and create focused local commits
 
+## Phase 10: Explicit Provisioning & Environment Doctor
+> Make the safe local/self-hosted setup path repeatable without hiding large
+> downloads or emulator resource use.
+
+- [ ] `EnsureAVD` validates, reuses, or creates a matching lightweight AVD
+- [ ] System-image installation is explicit and licences remain developer-owned
+- [ ] Existing AVDs are verified and never overwritten
+- [ ] Provisioned AVDs compose directly with the safe `HeadlessAVD` profile
+- [ ] `adbtest doctor` checks tools, host ABI, acceleration, profiles, and AVDs
+- [ ] Doctor remains read-only, sequential, bounded, and dependency-free
+- [ ] Unit, race, vet, lint, build, tagged-example, and module checks pass
+
 ---
 
 ## Non-Goals (v1)

@@ -4,6 +4,31 @@ This is the durable recovery log for the initial `go-adbtest` implementation.
 Update it before changing tasks and after every material decision or validation
 result.
 
+## Active M10 Checkpoint — 2026-08-03
+
+The user requested an explicit AVD provisioning path plus a lightweight doctor
+command. Work continues locally on `master`; nothing will be pushed and no host
+emulator will be started during this milestone.
+
+Council decisions:
+
+- `EnsureAVD` remains an explicit operation separate from `Setup`. It validates
+  and reuses an exact profile or creates it, but never launches the emulator.
+- System-image installation is opt-in because it can download several
+  gigabytes. Android SDK licence acceptance remains an explicit developer step.
+- The default AVD is `small_phone` + non-Play `google_apis` + the host-native
+  ABI. Existing same-name AVDs must match; the library never overwrites them.
+- The returned AVD handle composes with `HeadlessAVD`, which remains the single
+  source of the safe no-window/no-audio/no-snapshot/two-core/accelerated launch
+  flags.
+- `adbtest doctor` is a stdlib-only, read-only command. It runs bounded checks
+  sequentially and never downloads packages, accepts licences, starts an
+  emulator, contacts a device, or changes AVD state.
+- Current Command-line Tools still provide the deterministic `sdkmanager` and
+  `avdmanager` contracts needed here. The newer Android CLI is not used because
+  its documented emulator creation command does not yet expose a stable AVD
+  name, API, target, and architecture across supported hosts.
+
 ## Final Local Checkpoint — 2026-07-31
 
 - M0 remains the pushed remote baseline; M1 through M9 are complete in focused
@@ -150,11 +175,12 @@ socket/forward ownership, current emulator GPU defaults, and all lint findings.
 | 2026-07-31 | Added lightweight cross-boundary example | Commit `3999a1c` keeps lifecycle/CDP always on, makes DocumentsUI and permissions opt-in, uses unique fixtures, and supplies a small-phone serial CI template |
 | 2026-07-31 | Completed final M9 validation | Full race, vet, lint (normal and tagged), builds, module checks, tagged example, YAML parsing, diff checks, and govulncheck pass; no emulator was started |
 | 2026-07-31 | Expanded public AVD and API guidance | README now distinguishes AVD names, hardware profiles, and ADB serials; documents Android Studio, CLI, and deterministic CI selection; and explains CDP, native UI, permissions, lifecycle, and ADB usage. No emulator was started |
+| 2026-08-03 | Began M10 provisioning and doctor design | Council selected explicit safe-profile provisioning, opt-in image installation, strict non-overwriting reuse, and a read-only stdlib doctor; no emulator was started |
 
 ## Next Action
 
-Review the complete local commit series; keep it unpushed until the user asks.
-Do not start another existing host AVD in this session. A future integration
-run should first provision the dedicated 720x1280 `small_phone`, non-Play
-`google_apis` x86_64 AVD described above, then run the suite serially. Push, PR
-creation, or other GitHub changes require a new user request.
+Implement and deterministically validate M10, then run the full release-quality
+suite and council review. Keep every commit local and do not start another
+existing host AVD. A later live integration run should use the newly provisioned
+720x1280 `small_phone`, non-Play `google_apis` host-native AVD and run serially.
+Push, PR creation, or other GitHub changes require a new user request.

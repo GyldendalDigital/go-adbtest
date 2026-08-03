@@ -33,6 +33,7 @@ acceptance criteria, and recovery status.
 | M7 | Examples and public documentation | M6 | Complete | `67731ad`, `e1f5665`, `229ea36`, `99e6c1d` |
 | M8 | Cross-package council review and release-quality validation | M1–M7 | Complete locally | `31b3564`, `820400d`, `9019bb5` |
 | M9 | Host Android smoke and lightweight emulator profile | M8 | Complete locally; live run deliberately bounded | `b418420`, `a2522ef`, `e503bb0`, `3999a1c`, `6efa95b` |
+| M10 | Explicit AVD provisioning and environment doctor | M9 | In progress locally | — |
 
 ## Task Specifications and Acceptance Criteria
 
@@ -168,6 +169,36 @@ lint (including the integration build tag), native and Windows builds, module
 tidiness/verification, tagged example tests, YAML parsing, formatting/diff
 checks, and govulncheck all succeeded. No emulator was started for this final
 pass.
+
+### M10 — Explicit AVD provisioning and environment doctor
+
+Files: root provisioning API and tests, shared internal Android SDK tooling,
+`cmd/adbtest`, doctor engine/tests, public documentation, and status documents.
+
+Acceptance criteria:
+
+- Add an explicit `EnsureAVD` API that reuses only a matching named AVD or
+  creates one from a host-native, non-Play system image and hardware profile.
+- Default provisioning to `small_phone`, `google_apis`, and the accelerated
+  host-native ABI. Reject cross-architecture, Play Store, and ATD requests in
+  this safe path.
+- Never overwrite, delete, or silently rewrite an existing AVD. Verify its
+  system image and hardware profile before reuse.
+- Keep SDK image installation explicitly opt-in because it can download
+  several gigabytes. Never accept Android SDK licences automatically; return
+  an actionable `sdkmanager --licenses` hint when needed.
+- Invoke `sdkmanager` and `avdmanager` directly with bounded contexts and no
+  shell. Never pass `--force`; confirm a created AVD before returning it.
+- Compose provisioning with `HeadlessAVD` through the returned AVD handle so
+  safe launch flags remain centralized and Setup remains non-provisioning.
+- Add a stdlib-only `adbtest doctor` command that checks the minimum Go/Android
+  SDK tools, `small_phone` profile, host ABI, VM acceleration, configured AVDs,
+  and optional `aapt`, with concrete remediation hints and stable exit codes.
+- Doctor is read-only and sequential: it must not start an emulator, contact a
+  device, install/update packages, accept licences, or mutate AVDs.
+- Cover both features with deterministic fakes; do not start a host emulator.
+- Update the session record after every material decision and validation pass,
+  create focused local commits, and do not push.
 
 ## External Follow-up
 
