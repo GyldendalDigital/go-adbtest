@@ -85,6 +85,7 @@ func TestNew_WithFakeADB(t *testing.T) {
 	}
 
 	t.Setenv("ANDROID_HOME", tmp)
+	t.Setenv("ANDROID_SDK_ROOT", "")
 
 	client, err := New("emulator-5554")
 	if err != nil {
