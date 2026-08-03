@@ -33,7 +33,7 @@ acceptance criteria, and recovery status.
 | M7 | Examples and public documentation | M6 | Complete | `67731ad`, `e1f5665`, `229ea36`, `99e6c1d` |
 | M8 | Cross-package council review and release-quality validation | M1–M7 | Complete locally | `31b3564`, `820400d`, `9019bb5` |
 | M9 | Host Android smoke and lightweight emulator profile | M8 | Complete locally; live run deliberately bounded | `b418420`, `a2522ef`, `e503bb0`, `3999a1c`, `6efa95b` |
-| M10 | Explicit AVD provisioning and environment doctor | M9 | Complete locally; live provisioning deliberately deferred | `2d64228`, `3377dc4`, `c8362d1`, `9f85bbf`, `9e5d936` |
+| M10 | Explicit AVD provisioning and environment doctor | M9 | Complete locally; live provisioning deliberately deferred | `2d64228`, `3377dc4`, `c8362d1`, `9f85bbf`, `9e5d936`, `7adf0c3` |
 
 ## Task Specifications and Acceptance Criteria
 
