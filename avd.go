@@ -124,7 +124,7 @@ func ensureAVDWithDependencies(ctx context.Context, profile AVDProfile, deps avd
 	if strings.TrimSpace(deps.getenv("ANDROID_HOME")) == "" &&
 		strings.TrimSpace(deps.getenv("ANDROID_SDK_ROOT")) == "" {
 		return AVD{}, fmt.Errorf(
-			"ensure AVD %q: ANDROID_HOME is required so provisioning and Setup use the same Android SDK",
+			"ensure AVD %q: set ANDROID_HOME (or legacy ANDROID_SDK_ROOT) so provisioning and Setup use the same Android SDK",
 			normalized.Name,
 		)
 	}
@@ -189,13 +189,28 @@ func ensureAVDWithDependencies(ctx context.Context, profile AVDProfile, deps avd
 	if err != nil {
 		return AVD{}, fmt.Errorf("ensure AVD %q: %w", normalized.Name, err)
 	}
-	if err := requireHardwareProfile(ctx, avdmanager, &normalized, deps.run); err != nil {
+	profileAvailable, err := hardwareProfileAvailable(ctx, avdmanager, &normalized, deps.run)
+	if err != nil {
 		return AVD{}, fmt.Errorf("ensure AVD %q: %w", normalized.Name, err)
 	}
 	if !imageInstalled {
 		if err := ensureSystemImage(ctx, root, &normalized, imagePackage, deps); err != nil {
 			return AVD{}, err
 		}
+		if !profileAvailable {
+			profileAvailable, err = hardwareProfileAvailable(ctx, avdmanager, &normalized, deps.run)
+			if err != nil {
+				return AVD{}, fmt.Errorf("ensure AVD %q: %w", normalized.Name, err)
+			}
+		}
+	}
+	if !profileAvailable {
+		return AVD{}, fmt.Errorf(
+			"ensure AVD %q: hardware profile %q is unavailable; inspect valid IDs with %s",
+			normalized.Name,
+			normalized.Device,
+			formatCommand(avdmanager, []string{"list", "device", "-c"}),
+		)
 	}
 
 	args := []string{
@@ -476,27 +491,23 @@ func ensureSystemImage(
 	return nil
 }
 
-func requireHardwareProfile(
+func hardwareProfileAvailable(
 	ctx context.Context,
 	avdmanager string,
 	profile *AVDProfile,
 	run func(context.Context, string, []string, io.Reader, io.Writer) (androidsdk.CommandResult, error),
-) error {
+) (bool, error) {
 	args := []string{"list", "device", "-c"}
 	result, err := run(ctx, avdmanager, args, nil, nil)
 	if err != nil {
-		return commandFailure("list hardware profiles", avdmanager, args, result, err)
+		return false, commandFailure("list hardware profiles", avdmanager, args, result, err)
 	}
 	for _, line := range strings.Split(strings.ReplaceAll(result.Stdout, "\r\n", "\n"), "\n") {
 		if strings.TrimSpace(line) == profile.Device {
-			return nil
+			return true, nil
 		}
 	}
-	return fmt.Errorf(
-		"hardware profile %q is unavailable; inspect valid IDs with %s",
-		profile.Device,
-		formatCommand(avdmanager, args),
-	)
+	return false, nil
 }
 
 func listAVDs(

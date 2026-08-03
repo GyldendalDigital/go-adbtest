@@ -101,7 +101,7 @@ func TestEnsureAVDRequiresStableSDKEnvironment(t *testing.T) {
 	deps.getenv = func(string) string { return "" }
 
 	_, err := ensureAVDWithDependencies(context.Background(), AVDProfile{Name: "go_test", APILevel: 35}, deps)
-	if err == nil || !strings.Contains(err.Error(), "ANDROID_HOME is required") {
+	if err == nil || !strings.Contains(err.Error(), "ANDROID_HOME") || !strings.Contains(err.Error(), "ANDROID_SDK_ROOT") {
 		t.Fatalf("EnsureAVD() error = %v, want stable SDK environment", err)
 	}
 }
@@ -344,7 +344,12 @@ func TestEnsureAVDInstallsAndCreatesWithoutForce(t *testing.T) {
 		t.Fatalf("progress = %q", progress.String())
 	}
 	if len(calls) != 5 {
-		t.Fatalf("commands = %#v, want AVD list, install, profile list, create, AVD confirmation", calls)
+		t.Fatalf("commands = %#v, want AVD list, profile preflight, install, create, AVD confirmation", calls)
+	}
+	if !strings.HasSuffix(calls[1].path, "avdmanager") ||
+		!reflect.DeepEqual(calls[1].args, []string{"list", "device", "-c"}) ||
+		!strings.HasSuffix(calls[2].path, "sdkmanager") {
+		t.Fatalf("pre-install command order = %#v, want profile preflight before image installation", calls[:3])
 	}
 	create := calls[3]
 	if create.stdin != "no\n" {
@@ -361,6 +366,51 @@ func TestEnsureAVDInstallsAndCreatesWithoutForce(t *testing.T) {
 	}
 	if !reflect.DeepEqual(create.args, wantCreate) {
 		t.Fatalf("create args = %v, want %v", create.args, wantCreate)
+	}
+}
+
+func TestEnsureAVDRetriesProfileContributedByInstalledImage(t *testing.T) {
+	root, home := t.TempDir(), t.TempDir()
+	deps := fakeAVDDependencies(root, home)
+	profileAvailable := false
+	created := false
+	var profileChecks int
+	deps.run = func(_ context.Context, path string, args []string, _ io.Reader, _ io.Writer) (androidsdk.CommandResult, error) {
+		switch {
+		case isListAVDs(path, args):
+			if created {
+				return androidsdk.CommandResult{Stdout: "go_test\n"}, nil
+			}
+			return androidsdk.CommandResult{}, nil
+		case strings.HasSuffix(path, "avdmanager") && reflect.DeepEqual(args, []string{"list", "device", "-c"}):
+			profileChecks++
+			if profileAvailable {
+				return androidsdk.CommandResult{Stdout: "small_phone\n"}, nil
+			}
+			return androidsdk.CommandResult{Stdout: "medium_phone\n"}, nil
+		case strings.HasSuffix(path, "sdkmanager"):
+			installImage(t, root, 35, "google_apis", "x86_64")
+			profileAvailable = true
+			return androidsdk.CommandResult{}, nil
+		case strings.HasSuffix(path, "avdmanager") && len(args) > 0 && args[0] == "create":
+			writeAVD(t, home, "go_test", 35, "google_apis", "x86_64", "small_phone", "\n")
+			created = true
+			return androidsdk.CommandResult{}, nil
+		default:
+			return androidsdk.CommandResult{}, fmt.Errorf("unexpected command: %s %v", path, args)
+		}
+	}
+
+	got, err := ensureAVDWithDependencies(context.Background(), AVDProfile{
+		Name:               "go_test",
+		APILevel:           35,
+		InstallSystemImage: true,
+	}, deps)
+	if err != nil {
+		t.Fatalf("EnsureAVD() error: %v", err)
+	}
+	if !got.Created || profileChecks != 2 {
+		t.Fatalf("EnsureAVD() = %+v, profile checks = %d; want post-install retry", got, profileChecks)
 	}
 }
 
