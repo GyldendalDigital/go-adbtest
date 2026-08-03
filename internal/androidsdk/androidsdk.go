@@ -101,16 +101,21 @@ func ResolveSDKRoot(explicit string) (string, error) {
 	return "", fmt.Errorf("android SDK root not found: set ANDROID_HOME or add Android SDK tools to PATH")
 }
 
-// FindTool resolves a supported Android SDK tool from root, then PATH.
+// FindTool resolves a supported Android SDK tool from root. When root is
+// empty, it resolves the tool from PATH instead.
 func FindTool(root, name string) (string, error) {
-	for _, candidate := range toolCandidates(strings.TrimSpace(root), name) {
+	root = strings.TrimSpace(root)
+	for _, candidate := range toolCandidates(root, name) {
 		if isFile(candidate) {
 			return candidate, nil
 		}
 	}
+	if root != "" {
+		return "", fmt.Errorf("%s not found in Android SDK %q", name, root)
+	}
 	path, err := exec.LookPath(name)
 	if err != nil {
-		return "", fmt.Errorf("%s not found in Android SDK %q or PATH", name, root)
+		return "", fmt.Errorf("%s not found on PATH", name)
 	}
 	return path, nil
 }
@@ -132,12 +137,25 @@ func AVDHomes() ([]string, error) {
 		homes = append(homes, path)
 	}
 
-	appendHome(os.Getenv("ANDROID_AVD_HOME"))
-	if userHome := strings.TrimSpace(os.Getenv("ANDROID_USER_HOME")); userHome != "" {
-		appendHome(filepath.Join(userHome, "avd"))
+	explicitAVDHome := strings.TrimSpace(os.Getenv("ANDROID_AVD_HOME"))
+	userHome := strings.TrimSpace(os.Getenv("ANDROID_USER_HOME"))
+	emulatorHome := strings.TrimSpace(os.Getenv("ANDROID_EMULATOR_HOME"))
+	legacySDKHome := strings.TrimSpace(os.Getenv("ANDROID_SDK_HOME"))
+	if explicitAVDHome == "" && (userHome != "" || emulatorHome != "" || legacySDKHome != "") {
+		return nil, fmt.Errorf(
+			"an Android home relocation variable is set; set ANDROID_AVD_HOME explicitly so avdmanager and emulator use the same AVD directory",
+		)
 	}
-	if emulatorHome := strings.TrimSpace(os.Getenv("ANDROID_EMULATOR_HOME")); emulatorHome != "" {
+
+	appendHome(explicitAVDHome)
+	if explicitAVDHome != "" {
+		return homes, nil
+	}
+	if emulatorHome != "" {
 		appendHome(filepath.Join(emulatorHome, "avd"))
+	}
+	if userHome != "" {
+		appendHome(filepath.Join(userHome, "avd"))
 	}
 	home, err := os.UserHomeDir()
 	if err != nil && len(homes) == 0 {
@@ -161,7 +179,11 @@ func validateSDKRoot(root string) (string, error) {
 	if !info.IsDir() {
 		return "", fmt.Errorf("android SDK root %q is not a directory", absolute)
 	}
-	return absolute, nil
+	resolved, err := filepath.EvalSymlinks(absolute)
+	if err != nil {
+		return "", fmt.Errorf("resolve Android SDK root symlinks %q: %w", absolute, err)
+	}
+	return resolved, nil
 }
 
 func samePath(left, right string) bool {
@@ -172,6 +194,12 @@ func samePath(left, right string) bool {
 	}
 	if rightErr == nil {
 		right = rightAbs
+	}
+	if resolved, err := filepath.EvalSymlinks(left); err == nil {
+		left = resolved
+	}
+	if resolved, err := filepath.EvalSymlinks(right); err == nil {
+		right = resolved
 	}
 	if runtime.GOOS == "windows" {
 		return strings.EqualFold(filepath.Clean(left), filepath.Clean(right))
@@ -284,7 +312,10 @@ func executableNames(name string) []string {
 
 func isFile(path string) bool {
 	info, err := os.Stat(path)
-	return err == nil && !info.IsDir()
+	if err != nil || !info.Mode().IsRegular() {
+		return false
+	}
+	return runtime.GOOS == "windows" || info.Mode().Perm()&0o111 != 0
 }
 
 func compareVersions(left, right string) int {
@@ -319,16 +350,17 @@ type cappedBuffer struct {
 
 func (b *cappedBuffer) Write(data []byte) (int, error) {
 	written := len(data)
-	remaining := maxCommandOutput - b.buffer.Len()
-	if remaining > 0 {
-		if len(data) > remaining {
-			data = data[:remaining]
-			b.truncated = true
-		}
-		_, _ = b.buffer.Write(data)
-	} else if len(data) > 0 {
+	if len(data) >= maxCommandOutput {
+		b.buffer.Reset()
+		_, _ = b.buffer.Write(data[len(data)-maxCommandOutput:])
+		b.truncated = true
+		return written, nil
+	}
+	if overflow := b.buffer.Len() + len(data) - maxCommandOutput; overflow > 0 {
+		_ = b.buffer.Next(overflow)
 		b.truncated = true
 	}
+	_, _ = b.buffer.Write(data)
 	return written, nil
 }
 
@@ -336,7 +368,7 @@ func (b *cappedBuffer) String() string {
 	if !b.truncated {
 		return b.buffer.String()
 	}
-	return b.buffer.String() + "\n... output truncated ..."
+	return "... output truncated; showing tail ...\n" + b.buffer.String()
 }
 
 type synchronizedWriter struct {
@@ -347,5 +379,6 @@ type synchronizedWriter struct {
 func (w *synchronizedWriter) Write(data []byte) (int, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	return w.writer.Write(data)
+	_, _ = w.writer.Write(data)
+	return len(data), nil
 }

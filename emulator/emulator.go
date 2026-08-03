@@ -8,13 +8,13 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/GyldendalDigital/go-adbtest/adb"
+	"github.com/GyldendalDigital/go-adbtest/internal/androidsdk"
 )
 
 const (
@@ -502,14 +502,16 @@ func (i *Instance) terminateAndWait() error {
 
 // findEmulator locates the emulator binary.
 func findEmulator() (string, error) {
-	for _, env := range []string{"ANDROID_HOME", "ANDROID_SDK_ROOT"} {
-		if root := os.Getenv(env); root != "" {
-			candidate := filepath.Join(root, "emulator", "emulator")
-			//nolint:gosec // Android SDK roots are explicit user configuration.
-			if _, err := os.Stat(candidate); err == nil {
-				return candidate, nil
-			}
+	if strings.TrimSpace(os.Getenv("ANDROID_HOME")) != "" || strings.TrimSpace(os.Getenv("ANDROID_SDK_ROOT")) != "" {
+		root, err := androidsdk.ResolveSDKRoot("")
+		if err != nil {
+			return "", fmt.Errorf("emulator: %w", err)
 		}
+		path, err := androidsdk.FindTool(root, "emulator")
+		if err != nil {
+			return "", fmt.Errorf("emulator: %w", err)
+		}
+		return path, nil
 	}
 
 	path, err := exec.LookPath("emulator")

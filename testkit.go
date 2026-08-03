@@ -6,9 +6,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
-	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -17,6 +14,7 @@ import (
 	"github.com/GyldendalDigital/go-adbtest/adb"
 	"github.com/GyldendalDigital/go-adbtest/cdp"
 	"github.com/GyldendalDigital/go-adbtest/emulator"
+	"github.com/GyldendalDigital/go-adbtest/internal/androidsdk"
 	"github.com/GyldendalDigital/go-adbtest/permissions"
 	"github.com/GyldendalDigital/go-adbtest/ui"
 )
@@ -542,89 +540,22 @@ func findAAPT() (string, error) {
 		}
 		return path, nil
 	}
-	path, err := exec.LookPath("aapt")
-	if err == nil {
+	if strings.TrimSpace(os.Getenv("ANDROID_HOME")) != "" || strings.TrimSpace(os.Getenv("ANDROID_SDK_ROOT")) != "" {
+		root, err := androidsdk.ResolveSDKRoot("")
+		if err != nil {
+			return "", fmt.Errorf("aapt: %w", err)
+		}
+		path, err := androidsdk.FindTool(root, "aapt")
+		if err != nil {
+			return "", fmt.Errorf("aapt: %w", err)
+		}
 		return path, nil
 	}
-
-	type candidate struct {
-		path    string
-		version string
-	}
-	var candidates []candidate
-	seenRoots := make(map[string]struct{})
-	for _, environmentName := range []string{"ANDROID_HOME", "ANDROID_SDK_ROOT"} {
-		root := strings.TrimSpace(os.Getenv(environmentName))
-		if root == "" {
-			continue
-		}
-		buildTools := filepath.Join(root, "build-tools")
-		if _, seen := seenRoots[buildTools]; seen {
-			continue
-		}
-		seenRoots[buildTools] = struct{}{}
-		entries, readErr := os.ReadDir(buildTools)
-		if readErr != nil {
-			continue
-		}
-		for _, entry := range entries {
-			if !entry.IsDir() {
-				continue
-			}
-			candidatePath := filepath.Join(buildTools, entry.Name(), "aapt")
-			//nolint:gosec // Android SDK roots are explicit user configuration.
-			info, statErr := os.Stat(candidatePath)
-			if statErr == nil && info.Mode().IsRegular() && info.Mode().Perm()&0o111 != 0 {
-				candidates = append(candidates, candidate{path: candidatePath, version: entry.Name()})
-			}
-		}
-	}
-	if len(candidates) == 0 {
+	path, err := exec.LookPath("aapt")
+	if err != nil {
 		return "", errors.New("aapt not found: install Android build-tools, add aapt to PATH, or set AAPT")
 	}
-	sort.Slice(candidates, func(i, j int) bool {
-		return compareBuildToolsVersions(candidates[i].version, candidates[j].version) > 0
-	})
-	return candidates[0].path, nil
-}
-
-func compareBuildToolsVersions(left, right string) int {
-	leftParts := numericVersionParts(left)
-	rightParts := numericVersionParts(right)
-	partCount := len(leftParts)
-	if len(rightParts) > partCount {
-		partCount = len(rightParts)
-	}
-	for index := 0; index < partCount; index++ {
-		var leftPart, rightPart int
-		if index < len(leftParts) {
-			leftPart = leftParts[index]
-		}
-		if index < len(rightParts) {
-			rightPart = rightParts[index]
-		}
-		if leftPart < rightPart {
-			return -1
-		}
-		if leftPart > rightPart {
-			return 1
-		}
-	}
-	return strings.Compare(left, right)
-}
-
-func numericVersionParts(version string) []int {
-	fields := strings.FieldsFunc(version, func(char rune) bool {
-		return char < '0' || char > '9'
-	})
-	parts := make([]int, 0, len(fields))
-	for _, field := range fields {
-		part, err := strconv.Atoi(field)
-		if err == nil {
-			parts = append(parts, part)
-		}
-	}
-	return parts
+	return path, nil
 }
 
 func waitForAttachedBoot(ctx context.Context, client *adb.Client) error {

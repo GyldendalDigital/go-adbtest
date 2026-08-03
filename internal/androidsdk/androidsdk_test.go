@@ -1,6 +1,7 @@
 package androidsdk
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
@@ -37,6 +38,24 @@ func TestResolveSDKRootRejectsConflictingEnvironment(t *testing.T) {
 	}
 }
 
+func TestResolveSDKRootCanonicalizesSymlink(t *testing.T) {
+	realRoot := t.TempDir()
+	link := filepath.Join(t.TempDir(), "sdk-link")
+	if err := os.Symlink(realRoot, link); err != nil {
+		t.Skipf("create SDK symlink: %v", err)
+	}
+	t.Setenv("ANDROID_HOME", link)
+	t.Setenv("ANDROID_SDK_ROOT", "")
+
+	got, err := ResolveSDKRoot("")
+	if err != nil {
+		t.Fatalf("ResolveSDKRoot() error: %v", err)
+	}
+	if got != realRoot {
+		t.Fatalf("ResolveSDKRoot() = %q, want canonical %q", got, realRoot)
+	}
+}
+
 func TestFindToolPrefersLatestCommandLineTools(t *testing.T) {
 	root := t.TempDir()
 	oldTool := createTool(t, root, "cmdline-tools", "9.0", "bin", "avdmanager")
@@ -65,8 +84,21 @@ func TestFindToolPrefersLatestAlias(t *testing.T) {
 	}
 }
 
-func TestAVDHomesUsesDocumentedPrecedence(t *testing.T) {
-	t.Setenv("ANDROID_AVD_HOME", filepath.Join(t.TempDir(), "explicit"))
+func TestFindToolDoesNotMixConfiguredSDKWithPATH(t *testing.T) {
+	root := t.TempDir()
+	pathRoot := t.TempDir()
+	createTool(t, pathRoot, "avdmanager")
+	t.Setenv("PATH", pathRoot)
+
+	_, err := FindTool(root, "avdmanager")
+	if err == nil || !strings.Contains(err.Error(), root) {
+		t.Fatalf("FindTool() error = %v, want root-only lookup failure", err)
+	}
+}
+
+func TestAVDHomesUsesExplicitHomeExclusively(t *testing.T) {
+	explicit := filepath.Join(t.TempDir(), "explicit")
+	t.Setenv("ANDROID_AVD_HOME", explicit)
 	t.Setenv("ANDROID_USER_HOME", filepath.Join(t.TempDir(), "user"))
 	t.Setenv("ANDROID_EMULATOR_HOME", filepath.Join(t.TempDir(), "emulator"))
 
@@ -74,17 +106,43 @@ func TestAVDHomesUsesDocumentedPrecedence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AVDHomes() error: %v", err)
 	}
-	if len(homes) < 3 {
-		t.Fatalf("AVDHomes() = %v, want at least three locations", homes)
+	if len(homes) != 1 || homes[0] != filepath.Clean(explicit) {
+		t.Fatalf("AVDHomes() = %v, want only explicit ANDROID_AVD_HOME", homes)
 	}
-	if !strings.HasSuffix(homes[0], "explicit") {
-		t.Fatalf("first AVD home = %q, want explicit ANDROID_AVD_HOME", homes[0])
+}
+
+func TestAVDHomesRequiresExplicitHomeForRelocationVariables(t *testing.T) {
+	for _, variable := range []string{"ANDROID_USER_HOME", "ANDROID_EMULATOR_HOME", "ANDROID_SDK_HOME"} {
+		t.Run(variable, func(t *testing.T) {
+			t.Setenv("ANDROID_AVD_HOME", "")
+			t.Setenv("ANDROID_USER_HOME", "")
+			t.Setenv("ANDROID_EMULATOR_HOME", "")
+			t.Setenv("ANDROID_SDK_HOME", "")
+			t.Setenv(variable, t.TempDir())
+
+			_, err := AVDHomes()
+			if err == nil || !strings.Contains(err.Error(), "set ANDROID_AVD_HOME") {
+				t.Fatalf("AVDHomes() error = %v, want coherent-home remediation", err)
+			}
+		})
 	}
-	if !strings.HasSuffix(homes[1], filepath.Join("user", "avd")) {
-		t.Fatalf("second AVD home = %q, want ANDROID_USER_HOME/avd", homes[1])
+}
+
+func TestAVDHomesUsesDefaultHomeWithoutRelocation(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("ANDROID_AVD_HOME", "")
+	t.Setenv("ANDROID_USER_HOME", "")
+	t.Setenv("ANDROID_EMULATOR_HOME", "")
+	t.Setenv("ANDROID_SDK_HOME", "")
+
+	homes, err := AVDHomes()
+	if err != nil {
+		t.Fatalf("AVDHomes() error: %v", err)
 	}
-	if !strings.HasSuffix(homes[2], filepath.Join("emulator", "avd")) {
-		t.Fatalf("third AVD home = %q, want ANDROID_EMULATOR_HOME/avd", homes[2])
+	want := filepath.Join(home, ".android", "avd")
+	if len(homes) != 1 || homes[0] != want {
+		t.Fatalf("AVDHomes() = %v, want [%s]", homes, want)
 	}
 }
 
@@ -115,6 +173,21 @@ func TestRunHonorsCancellation(t *testing.T) {
 	_, err := Run(ctx, os.Args[0], nil, nil, nil)
 	if err == nil || err != context.Canceled {
 		t.Fatalf("Run() error = %v, want context.Canceled", err)
+	}
+}
+
+func TestCappedBufferPreservesActionableTail(t *testing.T) {
+	var buffer cappedBuffer
+	prefix := bytes.Repeat([]byte("x"), maxCommandOutput)
+	if written, err := buffer.Write(prefix); err != nil || written != len(prefix) {
+		t.Fatalf("Write(prefix) = %d, %v", written, err)
+	}
+	if written, err := buffer.Write([]byte("FINAL ERROR")); err != nil || written != len("FINAL ERROR") {
+		t.Fatalf("Write(tail) = %d, %v", written, err)
+	}
+	got := buffer.String()
+	if !strings.Contains(got, "showing tail") || !strings.HasSuffix(got, "FINAL ERROR") {
+		t.Fatalf("String() did not preserve final diagnostics: suffix %q", got[len(got)-80:])
 	}
 }
 

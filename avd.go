@@ -11,7 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"unicode"
+	"sync"
 
 	"github.com/GyldendalDigital/go-adbtest/internal/androidsdk"
 )
@@ -20,6 +20,16 @@ const (
 	defaultAVDDevice = "small_phone"
 	defaultAVDTarget = "google_apis"
 )
+
+var ensureAVDLockRegistry = struct {
+	sync.Mutex
+	locks map[string]*ensureAVDLock
+}{locks: make(map[string]*ensureAVDLock)}
+
+type ensureAVDLock struct {
+	token      chan struct{}
+	references int
+}
 
 // AVDProfile describes an Android Virtual Device that EnsureAVD should
 // validate or create. Name and APILevel are required. Device defaults to
@@ -35,11 +45,9 @@ type AVDProfile struct {
 	Device string
 	// Target is a non-Play, non-ATD system-image target. Empty uses google_apis.
 	Target string
-	// Arch is the system-image ABI. Empty selects the host-native accelerated ABI.
+	// Arch is the system-image ABI. Empty selects the ABI matching the current
+	// Go process. On macOS, use a native Go toolchain rather than Rosetta.
 	Arch string
-	// SDKRoot optionally selects an Android SDK. Empty uses ANDROID_HOME,
-	// ANDROID_SDK_ROOT, or a root inferred from SDK tools on PATH.
-	SDKRoot string
 	// InstallSystemImage permits sdkmanager to download a missing image. It
 	// never accepts SDK licences; developers must do that explicitly.
 	InstallSystemImage bool
@@ -67,7 +75,8 @@ func (a AVD) HeadlessConfig(apk string) Config {
 // EnsureAVD validates and reuses a matching named AVD or creates it from the
 // requested profile. It never starts an emulator, overwrites an existing AVD,
 // accepts SDK licences, or downloads an image unless InstallSystemImage is
-// explicitly true.
+// explicitly true. This provisioning path supports Linux x86_64 and native
+// macOS amd64/arm64; Setup can still use separately managed AVDs elsewhere.
 //
 //nolint:gocritic // AVDProfile is a public value-style options struct by design.
 func EnsureAVD(ctx context.Context, profile AVDProfile) (AVD, error) {
@@ -76,6 +85,8 @@ func EnsureAVD(ctx context.Context, profile AVDProfile) (AVD, error) {
 
 type avdDependencies struct {
 	hostArch       string
+	hostOS         string
+	getenv         func(string) string
 	resolveSDKRoot func(string) (string, error)
 	findTool       func(string, string) (string, error)
 	avdHomes       func() ([]string, error)
@@ -85,6 +96,8 @@ type avdDependencies struct {
 func productionAVDDependencies() avdDependencies {
 	return avdDependencies{
 		hostArch:       runtime.GOARCH,
+		hostOS:         runtime.GOOS,
+		getenv:         os.Getenv,
 		resolveSDKRoot: androidsdk.ResolveSDKRoot,
 		findTool:       androidsdk.FindTool,
 		avdHomes:       androidsdk.AVDHomes,
@@ -97,21 +110,43 @@ func ensureAVDWithDependencies(ctx context.Context, profile AVDProfile, deps avd
 	if ctx == nil {
 		return AVD{}, fmt.Errorf("ensure AVD: context is nil")
 	}
+	if err := ctx.Err(); err != nil {
+		return AVD{}, fmt.Errorf("ensure AVD: %w", err)
+	}
 	if err := validateAVDDependencies(deps); err != nil {
 		return AVD{}, err
 	}
 
-	normalized, err := normalizeAVDProfile(profile, deps.hostArch)
+	normalized, err := normalizeAVDProfile(profile, deps.hostOS, deps.hostArch)
 	if err != nil {
 		return AVD{}, err
 	}
-	root, err := deps.resolveSDKRoot(normalized.SDKRoot)
+	if strings.TrimSpace(deps.getenv("ANDROID_HOME")) == "" &&
+		strings.TrimSpace(deps.getenv("ANDROID_SDK_ROOT")) == "" {
+		return AVD{}, fmt.Errorf(
+			"ensure AVD %q: ANDROID_HOME is required so provisioning and Setup use the same Android SDK",
+			normalized.Name,
+		)
+	}
+	root, err := deps.resolveSDKRoot("")
 	if err != nil {
 		return AVD{}, fmt.Errorf("ensure AVD %q: %w", normalized.Name, err)
 	}
-	normalized.SDKRoot = root
+	release, err := acquireEnsureAVDLock(ctx, root)
+	if err != nil {
+		return AVD{}, fmt.Errorf("ensure AVD %q: %w", normalized.Name, err)
+	}
+	defer release()
 	imagePackage := avdSystemImagePackage(&normalized)
 	result := AVD{Name: normalized.Name, SystemImage: imagePackage}
+	emulatorPath, err := deps.findTool(root, "emulator")
+	if err != nil {
+		return AVD{}, fmt.Errorf("ensure AVD %q: %w", normalized.Name, err)
+	}
+	listedAVDs, err := listAVDs(ctx, emulatorPath, deps.run)
+	if err != nil {
+		return AVD{}, fmt.Errorf("ensure AVD %q: %w", normalized.Name, err)
+	}
 
 	homes, err := deps.avdHomes()
 	if err != nil {
@@ -121,16 +156,35 @@ func ensureAVDWithDependencies(ctx context.Context, profile AVDProfile, deps avd
 	if err != nil {
 		return AVD{}, fmt.Errorf("ensure AVD %q: %w", normalized.Name, err)
 	}
+	listed := containsExactString(listedAVDs, normalized.Name)
+	if listed != found {
+		if listed {
+			return AVD{}, fmt.Errorf(
+				"ensure AVD %q: emulator lists the AVD but its registration metadata could not be verified",
+				normalized.Name,
+			)
+		}
+		return AVD{}, fmt.Errorf(
+			"ensure AVD %q: registration metadata exists but emulator -list-avds does not list it; repair or remove it manually",
+			normalized.Name,
+		)
+	}
 	if found {
-		if err := verifyAVDConfig(existingConfig, &normalized); err != nil {
+		if err := verifyAVDConfig(existingConfig, root, &normalized); err != nil {
 			return AVD{}, fmt.Errorf("ensure AVD %q: %w", normalized.Name, err)
 		}
-		if err := ensureSystemImage(ctx, &normalized, imagePackage, deps); err != nil {
+		if err := ensureSystemImage(ctx, root, &normalized, imagePackage, deps); err != nil {
 			return AVD{}, err
 		}
 		return result, nil
 	}
 
+	imageInstalled := systemImageInstalled(root, &normalized)
+	if !imageInstalled && !normalized.InstallSystemImage {
+		if err := ensureSystemImage(ctx, root, &normalized, imagePackage, deps); err != nil {
+			return AVD{}, err
+		}
+	}
 	avdmanager, err := deps.findTool(root, "avdmanager")
 	if err != nil {
 		return AVD{}, fmt.Errorf("ensure AVD %q: %w", normalized.Name, err)
@@ -138,8 +192,10 @@ func ensureAVDWithDependencies(ctx context.Context, profile AVDProfile, deps avd
 	if err := requireHardwareProfile(ctx, avdmanager, &normalized, deps.run); err != nil {
 		return AVD{}, fmt.Errorf("ensure AVD %q: %w", normalized.Name, err)
 	}
-	if err := ensureSystemImage(ctx, &normalized, imagePackage, deps); err != nil {
-		return AVD{}, err
+	if !imageInstalled {
+		if err := ensureSystemImage(ctx, root, &normalized, imagePackage, deps); err != nil {
+			return AVD{}, err
+		}
 	}
 
 	args := []string{
@@ -156,28 +212,80 @@ func ensureAVDWithDependencies(ctx context.Context, profile AVDProfile, deps avd
 		normalized.Progress,
 	)
 	if err != nil {
-		return AVD{}, commandFailure("create AVD", avdmanager, args, commandResult, err)
+		createErr := commandFailure("create AVD", avdmanager, args, commandResult, err)
+		matched, rediscoverErr := registeredAVDMatches(
+			ctx,
+			normalized.Name,
+			homes,
+			emulatorPath,
+			root,
+			&normalized,
+			deps.run,
+		)
+		if rediscoverErr == nil && matched {
+			return result, nil
+		}
+		if rediscoverErr != nil {
+			return AVD{}, errors.Join(createErr, fmt.Errorf("rediscover AVD after create failure: %w", rediscoverErr))
+		}
+		return AVD{}, createErr
 	}
-
-	createdConfig, found, err := findAVDConfig(normalized.Name, homes)
+	matched, err := registeredAVDMatches(
+		ctx,
+		normalized.Name,
+		homes,
+		emulatorPath,
+		root,
+		&normalized,
+		deps.run,
+	)
 	if err != nil {
 		return AVD{}, fmt.Errorf("verify created AVD %q: %w", normalized.Name, err)
 	}
-	if !found {
+	if !matched {
 		return AVD{}, fmt.Errorf(
-			"verify created AVD %q: avdmanager succeeded but its config.ini was not found",
+			"verify created AVD %q: avdmanager succeeded but emulator -list-avds does not list it",
 			normalized.Name,
 		)
-	}
-	if err := verifyAVDConfig(createdConfig, &normalized); err != nil {
-		return AVD{}, fmt.Errorf("verify created AVD %q: %w", normalized.Name, err)
 	}
 	result.Created = true
 	return result, nil
 }
 
+func acquireEnsureAVDLock(ctx context.Context, key string) (func(), error) {
+	ensureAVDLockRegistry.Lock()
+	lock := ensureAVDLockRegistry.locks[key]
+	if lock == nil {
+		lock = &ensureAVDLock{token: make(chan struct{}, 1)}
+		ensureAVDLockRegistry.locks[key] = lock
+	}
+	lock.references++
+	ensureAVDLockRegistry.Unlock()
+
+	select {
+	case lock.token <- struct{}{}:
+		return func() {
+			<-lock.token
+			releaseEnsureAVDLockReference(key, lock)
+		}, nil
+	case <-ctx.Done():
+		releaseEnsureAVDLockReference(key, lock)
+		return nil, ctx.Err()
+	}
+}
+
+func releaseEnsureAVDLockReference(key string, lock *ensureAVDLock) {
+	ensureAVDLockRegistry.Lock()
+	defer ensureAVDLockRegistry.Unlock()
+	lock.references--
+	if lock.references == 0 && ensureAVDLockRegistry.locks[key] == lock {
+		delete(ensureAVDLockRegistry.locks, key)
+	}
+}
+
 func validateAVDDependencies(deps avdDependencies) error {
-	if strings.TrimSpace(deps.hostArch) == "" || deps.resolveSDKRoot == nil || deps.findTool == nil ||
+	if strings.TrimSpace(deps.hostArch) == "" || strings.TrimSpace(deps.hostOS) == "" || deps.getenv == nil ||
+		deps.resolveSDKRoot == nil || deps.findTool == nil ||
 		deps.avdHomes == nil || deps.run == nil {
 		return fmt.Errorf("ensure AVD: internal dependencies are incomplete")
 	}
@@ -185,12 +293,11 @@ func validateAVDDependencies(deps avdDependencies) error {
 }
 
 //nolint:gocritic // Normalization returns an independent options value.
-func normalizeAVDProfile(profile AVDProfile, hostArch string) (AVDProfile, error) {
+func normalizeAVDProfile(profile AVDProfile, hostOS, hostArch string) (AVDProfile, error) {
 	profile.Name = strings.TrimSpace(profile.Name)
 	profile.Device = strings.TrimSpace(profile.Device)
 	profile.Target = strings.TrimSpace(profile.Target)
 	profile.Arch = strings.TrimSpace(profile.Arch)
-	profile.SDKRoot = strings.TrimSpace(profile.SDKRoot)
 
 	if !validAVDName(profile.Name) {
 		return AVDProfile{}, fmt.Errorf(
@@ -204,13 +311,13 @@ func normalizeAVDProfile(profile AVDProfile, hostArch string) (AVDProfile, error
 	if profile.Device == "" {
 		profile.Device = defaultAVDDevice
 	}
-	if !validProfileValue(profile.Device, true) {
+	if !validDeviceID(profile.Device) {
 		return AVDProfile{}, fmt.Errorf("ensure AVD %q: invalid hardware profile %q", profile.Name, profile.Device)
 	}
 	if profile.Target == "" {
 		profile.Target = defaultAVDTarget
 	}
-	if !validProfileValue(profile.Target, false) {
+	if !validTarget(profile.Target) {
 		return AVDProfile{}, fmt.Errorf("ensure AVD %q: invalid system-image target %q", profile.Name, profile.Target)
 	}
 	lowerTarget := strings.ToLower(profile.Target)
@@ -222,9 +329,23 @@ func normalizeAVDProfile(profile AVDProfile, hostArch string) (AVDProfile, error
 		)
 	}
 
-	nativeArch, err := nativeAndroidArch(hostArch)
+	if hostOS != "linux" && hostOS != "darwin" {
+		return AVDProfile{}, fmt.Errorf(
+			"ensure AVD %q: host %q is not supported; lightweight provisioning requires Linux or macOS",
+			profile.Name,
+			hostOS,
+		)
+	}
+	nativeArch, err := androidsdk.NativeArch(hostArch)
 	if err != nil {
 		return AVDProfile{}, fmt.Errorf("ensure AVD %q: %w", profile.Name, err)
+	}
+	if hostArch == "arm64" && hostOS != "darwin" {
+		return AVDProfile{}, fmt.Errorf(
+			"ensure AVD %q: the Android Emulator does not support accelerated %s/arm64 hosts",
+			profile.Name,
+			hostOS,
+		)
 	}
 	if profile.Arch == "" {
 		profile.Arch = nativeArch
@@ -238,17 +359,6 @@ func normalizeAVDProfile(profile AVDProfile, hostArch string) (AVDProfile, error
 		)
 	}
 	return profile, nil
-}
-
-func nativeAndroidArch(hostArch string) (string, error) {
-	switch hostArch {
-	case "amd64":
-		return "x86_64", nil
-	case "arm64":
-		return "arm64-v8a", nil
-	default:
-		return "", fmt.Errorf("host architecture %q has no supported accelerated Android system image", hostArch)
-	}
 }
 
 func validAVDName(name string) bool {
@@ -268,14 +378,28 @@ func validAVDName(name string) bool {
 	return true
 }
 
-func validProfileValue(value string, allowSpace bool) bool {
-	if value == "" || strings.ContainsAny(value, ";/\\") {
+func validDeviceID(value string) bool {
+	if value == "" || value == "." || value == ".." {
 		return false
 	}
-	for _, character := range value {
-		if unicode.IsControl(character) || (!allowSpace && unicode.IsSpace(character)) {
+	for _, character := range []byte(value) {
+		if character < ' ' || character > '~' {
 			return false
 		}
+	}
+	return true
+}
+
+func validTarget(value string) bool {
+	if value == "" || value == "." || value == ".." {
+		return false
+	}
+	for _, character := range []byte(value) {
+		if character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' ||
+			character >= '0' && character <= '9' || character == '.' || character == '-' || character == '_' {
+			continue
+		}
+		return false
 	}
 	return true
 }
@@ -284,9 +408,9 @@ func avdSystemImagePackage(profile *AVDProfile) string {
 	return fmt.Sprintf("system-images;android-%d;%s;%s", profile.APILevel, profile.Target, profile.Arch)
 }
 
-func systemImageDirectory(profile *AVDProfile) string {
+func systemImageDirectory(root string, profile *AVDProfile) string {
 	return filepath.Join(
-		profile.SDKRoot,
+		root,
 		"system-images",
 		"android-"+strconv.Itoa(profile.APILevel),
 		profile.Target,
@@ -294,35 +418,36 @@ func systemImageDirectory(profile *AVDProfile) string {
 	)
 }
 
-func systemImageInstalled(profile *AVDProfile) bool {
-	directory := systemImageDirectory(profile)
+func systemImageInstalled(root string, profile *AVDProfile) bool {
+	directory := systemImageDirectory(root, profile)
 	info, err := os.Stat(directory)
 	if err != nil || !info.IsDir() {
 		return false
 	}
-	for _, marker := range []string{"package.xml", "source.properties"} {
-		if markerInfo, markerErr := os.Stat(filepath.Join(directory, marker)); markerErr == nil && !markerInfo.IsDir() {
-			return true
+	for _, marker := range []string{"package.xml", "source.properties", "system.img", "ramdisk.img"} {
+		if markerInfo, markerErr := os.Stat(filepath.Join(directory, marker)); markerErr != nil || !markerInfo.Mode().IsRegular() {
+			return false
 		}
 	}
-	return false
+	return true
 }
 
 func ensureSystemImage(
 	ctx context.Context,
+	root string,
 	profile *AVDProfile,
 	imagePackage string,
 	deps avdDependencies,
 ) error {
-	if systemImageInstalled(profile) {
+	if systemImageInstalled(root, profile) {
 		return nil
 	}
-	sdkmanager, findErr := deps.findTool(profile.SDKRoot, "sdkmanager")
+	sdkmanager, findErr := deps.findTool(root, "sdkmanager")
 	if findErr != nil {
 		return fmt.Errorf("ensure AVD %q system image %q: %w", profile.Name, imagePackage, findErr)
 	}
-	installArgs := []string{"--sdk_root=" + profile.SDKRoot, "--install", imagePackage}
-	licensesArgs := []string{"--sdk_root=" + profile.SDKRoot, "--licenses"}
+	installArgs := []string{"--sdk_root=" + root, "--install", imagePackage}
+	licensesArgs := []string{"--sdk_root=" + root, "--licenses"}
 	if !profile.InstallSystemImage {
 		return fmt.Errorf(
 			"ensure AVD %q: system image %q is not installed; install it explicitly with %s, accept licences interactively with %s, or set InstallSystemImage true after accepting licences",
@@ -341,11 +466,11 @@ func ensureSystemImage(
 			fmt.Errorf("android SDK licences are never accepted automatically; run %s interactively", formatCommand(sdkmanager, licensesArgs)),
 		)
 	}
-	if !systemImageInstalled(profile) {
+	if !systemImageInstalled(root, profile) {
 		return fmt.Errorf(
 			"install system image %q: sdkmanager succeeded but %q is incomplete",
 			imagePackage,
-			systemImageDirectory(profile),
+			systemImageDirectory(root, profile),
 		)
 	}
 	return nil
@@ -374,15 +499,70 @@ func requireHardwareProfile(
 	)
 }
 
+func listAVDs(
+	ctx context.Context,
+	emulatorPath string,
+	run func(context.Context, string, []string, io.Reader, io.Writer) (androidsdk.CommandResult, error),
+) ([]string, error) {
+	args := []string{"-list-avds"}
+	result, err := run(ctx, emulatorPath, args, nil, nil)
+	if err != nil {
+		return nil, commandFailure("list AVDs", emulatorPath, args, result, err)
+	}
+	var avds []string
+	for _, line := range strings.Split(strings.ReplaceAll(result.Stdout, "\r\n", "\n"), "\n") {
+		if name := strings.TrimSpace(line); name != "" {
+			avds = append(avds, name)
+		}
+	}
+	return avds, nil
+}
+
+func registeredAVDMatches(
+	ctx context.Context,
+	name string,
+	homes []string,
+	emulatorPath string,
+	sdkRoot string,
+	profile *AVDProfile,
+	run func(context.Context, string, []string, io.Reader, io.Writer) (androidsdk.CommandResult, error),
+) (bool, error) {
+	listedAVDs, err := listAVDs(ctx, emulatorPath, run)
+	if err != nil {
+		return false, err
+	}
+	if !containsExactString(listedAVDs, name) {
+		return false, nil
+	}
+	configPath, found, err := findAVDConfig(name, homes)
+	if err != nil {
+		return false, err
+	}
+	if !found {
+		return false, fmt.Errorf("emulator lists the AVD but its config.ini was not found")
+	}
+	if err := verifyAVDConfig(configPath, sdkRoot, profile); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func containsExactString(values []string, expected string) bool {
+	for _, value := range values {
+		if value == expected {
+			return true
+		}
+	}
+	return false
+}
+
 func findAVDConfig(name string, homes []string) (configPath string, found bool, err error) {
 	for _, home := range homes {
 		if strings.TrimSpace(home) == "" {
 			continue
 		}
 		metadataPath := filepath.Join(home, name+".ini")
-		// name is restricted to an ASCII AVD identifier and home comes from the
-		// Android emulator's documented configuration locations.
-		metadata, err := os.ReadFile(metadataPath) //nolint:gosec // Restricted AVD name under an Android-owned home.
+		metadata, err := readRegularFile(metadataPath)
 		if err == nil {
 			values := parseINI(metadata)
 			avdPath := strings.TrimSpace(values["path"])
@@ -398,44 +578,47 @@ func findAVDConfig(name string, homes []string) (configPath string, found bool, 
 				avdPath = filepath.Join(home, avdPath)
 			}
 			configPath := filepath.Join(filepath.Clean(avdPath), "config.ini")
-			if _, statErr := os.Stat(configPath); statErr != nil {
+			if configInfo, statErr := os.Stat(configPath); statErr != nil {
 				return "", false, fmt.Errorf("AVD metadata %q points to missing config %q: %w", metadataPath, configPath, statErr)
+			} else if !configInfo.Mode().IsRegular() {
+				return "", false, fmt.Errorf("AVD config %q is not a regular file", configPath)
 			}
 			return configPath, true, nil
 		}
 		if !errors.Is(err, os.ErrNotExist) {
 			return "", false, fmt.Errorf("read AVD metadata %q: %w", metadataPath, err)
 		}
-
-		directConfig := filepath.Join(home, name+".avd", "config.ini")
-		if _, statErr := os.Stat(directConfig); statErr == nil {
-			return directConfig, true, nil
-		} else if !errors.Is(statErr, os.ErrNotExist) {
-			return "", false, fmt.Errorf("inspect AVD config %q: %w", directConfig, statErr)
-		}
 	}
 	return "", false, nil
 }
 
-func verifyAVDConfig(configPath string, profile *AVDProfile) error {
-	// configPath is resolved from validated AVD metadata, not arbitrary input.
-	data, err := os.ReadFile(configPath) //nolint:gosec // Path was resolved from validated AVD metadata.
+func verifyAVDConfig(configPath, sdkRoot string, profile *AVDProfile) error {
+	data, err := readRegularFile(configPath)
 	if err != nil {
 		return fmt.Errorf("read existing config %q: %w", configPath, err)
 	}
 	values := parseINI(data)
-	wantImage := strings.ReplaceAll(avdSystemImagePackage(profile), ";", "/")
-	gotImage := normalizeImagePath(values["image.sysdir.1"])
+	wantImageDirectory := systemImageDirectory(sdkRoot, profile)
+	gotImageDirectory := configuredImageDirectory(sdkRoot, values["image.sysdir.1"])
 
-	mismatches := make([]string, 0, 4)
-	if gotImage != wantImage {
-		mismatches = append(mismatches, fmt.Sprintf("system image %q (want %q)", gotImage, wantImage))
+	mismatches := make([]string, 0, 7)
+	if got := strings.TrimSpace(values["AvdId"]); got != "" && got != profile.Name {
+		mismatches = append(mismatches, fmt.Sprintf("AVD ID %q (want %q)", got, profile.Name))
+	}
+	if got := strings.TrimSpace(values["target"]); got != "" && got != "android-"+strconv.Itoa(profile.APILevel) {
+		mismatches = append(mismatches, fmt.Sprintf("API target %q (want %q)", got, "android-"+strconv.Itoa(profile.APILevel)))
+	}
+	if !sameFilesystemPath(gotImageDirectory, wantImageDirectory) {
+		mismatches = append(mismatches, fmt.Sprintf("system image directory %q (want %q)", gotImageDirectory, wantImageDirectory))
 	}
 	if got := strings.TrimSpace(values["hw.device.name"]); got != profile.Device {
 		mismatches = append(mismatches, fmt.Sprintf("hardware profile %q (want %q)", got, profile.Device))
 	}
-	if got := strings.TrimSpace(values["hw.cpu.arch"]); got != "" && got != profile.Arch {
-		mismatches = append(mismatches, fmt.Sprintf("architecture %q (want %q)", got, profile.Arch))
+	if got := strings.TrimSpace(values["hw.cpu.arch"]); got != "" && got != emulatorCPUArch(profile.Arch) {
+		mismatches = append(mismatches, fmt.Sprintf("CPU architecture %q (want %q)", got, emulatorCPUArch(profile.Arch)))
+	}
+	if got := strings.TrimSpace(values["abi.type"]); got != "" && got != profile.Arch {
+		mismatches = append(mismatches, fmt.Sprintf("ABI %q (want %q)", got, profile.Arch))
 	}
 	if got := strings.TrimSpace(values["tag.id"]); got != "" && got != profile.Target {
 		mismatches = append(mismatches, fmt.Sprintf("target %q (want %q)", got, profile.Target))
@@ -448,6 +631,17 @@ func verifyAVDConfig(configPath string, profile *AVDProfile) error {
 		)
 	}
 	return nil
+}
+
+func readRegularFile(path string) ([]byte, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("%q is not a regular file", path)
+	}
+	return os.ReadFile(path) //nolint:gosec // Callers restrict paths to Android SDK/AVD metadata.
 }
 
 func parseINI(data []byte) map[string]string {
@@ -466,12 +660,54 @@ func parseINI(data []byte) map[string]string {
 	return values
 }
 
-func normalizeImagePath(path string) string {
-	path = strings.Trim(strings.ReplaceAll(strings.TrimSpace(path), "\\", "/"), "/")
-	if index := strings.Index(path, "system-images/"); index >= 0 {
-		path = path[index:]
+func configuredImageDirectory(sdkRoot, configured string) string {
+	configured = filepath.FromSlash(strings.ReplaceAll(strings.TrimSpace(configured), "\\", "/"))
+	if configured == "" {
+		return ""
 	}
-	return path
+	if !filepath.IsAbs(configured) {
+		configured = filepath.Join(sdkRoot, configured)
+	}
+	return filepath.Clean(configured)
+}
+
+func sameFilesystemPath(left, right string) bool {
+	if left == "" || right == "" {
+		return false
+	}
+	left = canonicalPathWithMissingSuffix(left)
+	right = canonicalPathWithMissingSuffix(right)
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(filepath.Clean(left), filepath.Clean(right))
+	}
+	return filepath.Clean(left) == filepath.Clean(right)
+}
+
+func canonicalPathWithMissingSuffix(path string) string {
+	path = filepath.Clean(path)
+	current := path
+	var missing []string
+	for {
+		if resolved, err := filepath.EvalSymlinks(current); err == nil {
+			for index := len(missing) - 1; index >= 0; index-- {
+				resolved = filepath.Join(resolved, missing[index])
+			}
+			return resolved
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return path
+		}
+		missing = append(missing, filepath.Base(current))
+		current = parent
+	}
+}
+
+func emulatorCPUArch(abi string) string {
+	if abi == "arm64-v8a" {
+		return "arm64"
+	}
+	return abi
 }
 
 func commandFailure(

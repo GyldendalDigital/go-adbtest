@@ -8,10 +8,11 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/GyldendalDigital/go-adbtest/internal/androidsdk"
 )
 
 // Client wraps adb commands targeting a specific device/emulator.
@@ -202,14 +203,16 @@ func (c *Client) baseArgs() []string {
 // findADB locates the adb binary.
 // Resolution order: $ANDROID_HOME/platform-tools/adb → $ANDROID_SDK_ROOT/platform-tools/adb → PATH.
 func findADB() (string, error) {
-	for _, env := range []string{"ANDROID_HOME", "ANDROID_SDK_ROOT"} {
-		if root := os.Getenv(env); root != "" {
-			candidate := filepath.Join(root, "platform-tools", "adb")
-			//nolint:gosec // Android SDK roots are explicit user configuration.
-			if _, err := os.Stat(candidate); err == nil {
-				return candidate, nil
-			}
+	if strings.TrimSpace(os.Getenv("ANDROID_HOME")) != "" || strings.TrimSpace(os.Getenv("ANDROID_SDK_ROOT")) != "" {
+		root, err := androidsdk.ResolveSDKRoot("")
+		if err != nil {
+			return "", fmt.Errorf("adb: %w", err)
 		}
+		path, err := androidsdk.FindTool(root, "adb")
+		if err != nil {
+			return "", fmt.Errorf("adb: %w", err)
+		}
+		return path, nil
 	}
 
 	path, err := exec.LookPath("adb")
