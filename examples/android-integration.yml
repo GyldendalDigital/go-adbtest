@@ -1,0 +1,77 @@
+# Consumer template: copy this file to .github/workflows/android-integration.yml
+# and replace the fixture-specific placeholders below.
+name: Android WebView integration
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  android-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      ADBTEST_APK: ${{ github.workspace }}/app/build/outputs/apk/debug/app-debug.apk
+      ADBTEST_APP_PACKAGE: com.example.app
+      # ADBTEST_APP_PROCESS: :webview # Uncomment for a secondary WebView process.
+      ADBTEST_APP_ACTIVITY: .MainActivity
+      ADBTEST_APP_TIMEOUT: 2m
+      # ADBTEST_FILE_PICKER: "true" # Requires WebView file-chooser support.
+      # Set all three to enable the optional runtime-permission example:
+      # ADBTEST_PERMISSION_TRIGGER_SELECTOR: "#request-permission"
+      # ADBTEST_RESULT_SELECTOR: "#permission-status"
+      # ADBTEST_EXPECTED_TEXT: granted
+      ADBTEST_INTERACTION_TIMEOUT: 30s
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build APK
+        run: |
+          # Replace this command and ADBTEST_APK with the consumer app's build.
+          ./gradlew assembleDebug
+          test -f "$ADBTEST_APK"
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Run Android integration suite
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          arch: x86_64
+          target: google_apis
+          profile: small_phone
+          avd-name: go_adbtest_api_35
+          emulator-port: 5554
+          cores: 2
+          emulator-options: >-
+            -no-window
+            -gpu auto
+            -accel on
+            -no-audio
+            -no-boot-anim
+            -no-snapshot
+          script: |
+            serial="emulator-${EMULATOR_PORT}"
+            adb -s "$serial" get-state
+            ADBTEST_SERIAL="$serial" go test \
+              -p=1 \
+              -tags=android_integration \
+              -count=1 \
+              -timeout=10m \
+              ./integration/...
