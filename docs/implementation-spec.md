@@ -61,11 +61,13 @@ WebView with WebView debugging enabled.
 ```text
 go-adbtest/
 ├── testkit.go          # package adbtest: Config, Device, Setup
+├── avd.go              # explicit lightweight AVD provisioning
 ├── adb/                # context-aware adb process wrapper
 ├── emulator/           # owned emulator lifecycle
 ├── ui/                 # uiautomator parsing and native interaction
 ├── cdp/                # CDP WebSocket transport and WebView interaction
-└── permissions/        # Android runtime-permission dialogs
+├── permissions/        # Android runtime-permission dialogs
+└── cmd/adbtest/        # read-only environment doctor
 ```
 
 Each subpackage is independently usable. The root package composes them into a
@@ -97,7 +99,8 @@ type Config struct {
 }
 ```
 
-Exactly one of `AVD` and `Serial` is required:
+Exactly one of `AVD` and `Serial` is required. `Setup` never provisions a
+device:
 
 - `AVD` starts an existing configured emulator. The returned `Device` owns and
   stops it; Setup does not download an image or create an AVD.
@@ -127,9 +130,9 @@ There are no hidden `true` defaults. The non-boolean zero-value defaults are:
 `aapt dump badging` before acquiring a device. AAPT resolution is:
 
 1. the `AAPT` environment variable;
-2. `aapt` on `PATH`;
-3. the newest executable `aapt` under `ANDROID_HOME/build-tools` or
-   `ANDROID_SDK_ROOT/build-tools`.
+2. the newest executable `aapt` below the coherently configured
+   `ANDROID_HOME`/`ANDROID_SDK_ROOT` when either variable is present;
+3. `aapt` on `PATH` only when no SDK root is configured.
 
 If `AppPackage` is supplied, `aapt` is not required. APK inspection also keeps
 the first `launchable-activity` when present.
@@ -162,6 +165,75 @@ image-managed. Requiring acceleration fails startup if the host hypervisor is
 unusable instead of permitting CPU emulation. Callers can override fields
 before Setup. `MemoryMB` accepts zero or 1536–8192 MB, but modern system images
 can enforce a higher safe minimum.
+
+### Explicit AVD provisioning
+
+Provisioning is separate from `Setup` and is always caller-initiated:
+
+```go
+type AVDProfile struct {
+    Name               string
+    APILevel           int
+    Device             string
+    Target             string
+    Arch               string
+    InstallSystemImage bool
+    Progress           io.Writer
+}
+
+type AVD struct {
+    Name        string
+    SystemImage string
+    Created     bool
+}
+
+func EnsureAVD(ctx context.Context, profile AVDProfile) (AVD, error)
+func (a AVD) HeadlessConfig(apk string) Config
+```
+
+`Name` and `APILevel` are required. Empty `Device` and `Target` fields become
+`small_phone` and `google_apis`. Empty `Arch` selects `x86_64` on an amd64 host
+or `arm64-v8a` on an Apple Silicon host. Provisioning and its doctor readiness
+check support Linux x86_64 and macOS running a native amd64 or arm64 Go
+process. They reject cross-architecture images, Play Store and ATD targets,
+other host combinations, and Windows provisioning. Ordinary `Setup` with an
+already-configured Windows AVD remains separate from this safe path.
+
+`EnsureAVD` and the doctor require `ANDROID_HOME` or the legacy
+`ANDROID_SDK_ROOT`; when both are present they must identify the same SDK.
+After resolving the root, all SDK tools and system-image paths must come from
+it rather than falling back to another tool on `PATH`. When Android state is
+relocated through `ANDROID_USER_HOME`, `ANDROID_EMULATOR_HOME`, or legacy
+`ANDROID_SDK_HOME`, callers must set one explicit `ANDROID_AVD_HOME` used by
+both `avdmanager` and the emulator. An implicit relocated home is rejected.
+
+The requested system-image package is
+`system-images;android-<API>;<Target>;<Arch>`. Installation is disabled by
+default because it may download several gigabytes. If the image is missing,
+the error reports the exact `sdkmanager --install` and interactive
+`sdkmanager --licenses` commands. Setting `InstallSystemImage` additionally
+permits `sdkmanager` to install that missing image; licence acceptance is never
+automated. The hardware profile is checked before an opted-in download and, if
+it was absent, checked once more after installation so image-contributed
+profiles work. SDK and AVD tools run directly under the caller's context,
+without a host shell.
+
+An existing AVD is reused only when `emulator -list-avds`, its registration
+metadata, system-image directory, API, hardware profile, ABI, and target agree.
+A mismatch is an error. `EnsureAVD` never deletes, overwrites, force-creates,
+silently rewrites, or starts an AVD. New creation uses `avdmanager` without
+`--force`, supplies `no` to the optional custom-hardware-profile prompt, and
+verifies both emulator discovery and the resulting metadata before returning.
+Provisioning calls within one process serialize per SDK root. Separate
+processes must not concurrently mutate the same SDK or AVD home; provisioning
+belongs in one bounded bootstrap step before serial owned-emulator tests.
+
+`AVD.HeadlessConfig` delegates to `HeadlessAVD`. It therefore composes the
+validated name with `-no-window`, `-no-boot-anim`, `-no-audio`, `-no-snapshot`,
+`-cores 2`, `-gpu auto`, and `-accel on` when `Setup` later launches the AVD.
+It leaves data intact and RAM image-managed. The `Created` result only reports
+whether that call created the definition; no emulator process has been
+started.
 
 ### Device API
 
@@ -255,11 +327,9 @@ func DevicesContext(ctx context.Context) ([]string, error)
 and reap the ADB child process on cancellation. `-s <Serial>` is inserted
 before the host command when a serial is configured.
 
-ADB executable resolution is:
-
-1. `$ANDROID_HOME/platform-tools/adb`;
-2. `$ANDROID_SDK_ROOT/platform-tools/adb`;
-3. `adb` on `PATH`.
+When `ANDROID_HOME` or `ANDROID_SDK_ROOT` is configured, ADB is resolved only
+from that coherent SDK root. The variables must agree when both are set. With
+neither variable set, resolution falls back to `adb` on `PATH`.
 
 `Devices` returns every serial listed by adb, including offline and unauthorized
 entries. This lets emulator startup retain a complete pre-launch baseline while
@@ -526,6 +596,32 @@ its explicit `Serial`; do not also configure `AVD`. Setup installs the APK, so
 the runner script only needs to build it and expose its path and device serial.
 See the attached-emulator workflow in the README.
 
+### Environment doctor
+
+The optional command is installed and run with:
+
+```sh
+go install github.com/GyldendalDigital/go-adbtest/cmd/adbtest@latest
+adbtest doctor [--avd NAME] [--device-profile PROFILE]
+```
+
+The doctor is a stdlib-only, log-friendly diagnostic command. In stable order
+and with a 15-second bound per external command, it checks Go 1.23+, the stable
+Android SDK and AVD homes, supported host ABI, `adb`, emulator, `sdkmanager`,
+`avdmanager`, the hardware-profile ID, VM acceleration, configured AVD names,
+and optional `aapt`. `--avd` requires only the exact name to appear in the
+emulator's read-only listing; `EnsureAVD`, not doctor, validates that AVD's
+metadata and profile. `--device-profile` defaults to `small_phone`.
+
+It invokes only read-only version/list/acceleration commands. It never starts
+an emulator or ADB server, contacts a device or package repository, installs or
+updates an SDK package, accepts a licence, or creates or changes an AVD. It
+also states that licences, network access, disk capacity, and application
+WebView debugging remain outside its probe scope. Output uses stable ASCII
+`[OK]`, `[WARN]`, `[FAIL]`, and `[INFO]` labels. Exit code 0 means there is no
+required failure, 1 means one or more readiness checks failed, and 2 means a
+usage or check-invocation error prevented a report.
+
 The minimum Go version is 1.23. The module declares that baseline, and the
 required CI test job runs against the Go 1.23 release line.
 
@@ -540,7 +636,9 @@ their own assertion library; `testify` is not a module dependency.
 - A wiped AVD and a cold WebView may take significantly longer to initialize;
   configure timeouts rather than adding sleeps.
 - Run owned-AVD packages with `-p=1`. Prefer a 720×1280 non-Play-Store
-  `google_apis` x86_64 AVD with two cores; software graphics consume host CPU.
+  `google_apis` AVD with two cores and the host-native ABI (`x86_64` on Linux
+  x86_64/macOS amd64, `arm64-v8a` on macOS arm64); software graphics consume
+  host CPU.
 - `NoAudio: true` improves emulator stability but prevents successful audio
   capture even when the Android permission is granted.
 - CDP clicks use CSS pixels; no device-pixel-ratio multiplication is needed.

@@ -4,11 +4,13 @@ This is the durable recovery log for the initial `go-adbtest` implementation.
 Update it before changing tasks and after every material decision or validation
 result.
 
-## Active M10 Checkpoint — 2026-08-03
+## Completed M10 Checkpoint — 2026-08-03
 
 The user requested an explicit AVD provisioning path plus a lightweight doctor
 command. Work continues locally on `master`; nothing will be pushed and no host
-emulator will be started during this milestone.
+emulator will be started during this milestone. Provisioning, doctor, tests,
+public documentation, full static validation, and council closure are complete
+locally. No M10 commit has been pushed.
 
 Council decisions:
 
@@ -18,6 +20,14 @@ Council decisions:
   gigabytes. Android SDK licence acceptance remains an explicit developer step.
 - The default AVD is `small_phone` + non-Play `google_apis` + the host-native
   ABI. Existing same-name AVDs must match; the library never overwrites them.
+- Provisioning requires one stable SDK selected by `ANDROID_HOME` or the legacy
+  `ANDROID_SDK_ROOT`; when both are set they must resolve to the same SDK.
+  If `ANDROID_USER_HOME`, `ANDROID_EMULATOR_HOME`, or legacy
+  `ANDROID_SDK_HOME` relocates Android state, `ANDROID_AVD_HOME` must explicitly
+  select the directory used for AVDs.
+- Provisioning and doctor readiness support Linux x86_64 and native
+  macOS amd64/arm64. Windows provisioning is deliberately rejected for now;
+  ordinary `Setup` with an existing Windows AVD remains a separate path.
 - The returned AVD handle composes with `HeadlessAVD`, which remains the single
   source of the safe no-window/no-audio/no-snapshot/two-core/accelerated launch
   flags.
@@ -177,11 +187,16 @@ socket/forward ownership, current emulator GPU defaults, and all lint findings.
 | 2026-07-31 | Expanded public AVD and API guidance | README now distinguishes AVD names, hardware profiles, and ADB serials; documents Android Studio, CLI, and deterministic CI selection; and explains CDP, native UI, permissions, lifecycle, and ADB usage. No emulator was started |
 | 2026-08-03 | Began M10 provisioning and doctor design | Council selected explicit safe-profile provisioning, opt-in image installation, strict non-overwriting reuse, and a read-only stdlib doctor; no emulator was started |
 | 2026-08-03 | Implemented explicit AVD provisioning | Added shared SDK resolution/command helpers plus strict profile validation, opt-in image installation, non-overwriting creation, post-create verification, and direct safe-launch composition; targeted race, vet, lint, format, and diff checks pass without starting an emulator |
+| 2026-08-03 | Implemented the environment doctor | Added sequential bounded checks, actionable remediation, stable report labels/exit codes, and deterministic command tests; no emulator was started |
+| 2026-08-03 | Documented the M10 consumer path | README and implementation spec now distinguish provisioning from Setup, show safe headless composition and doctor usage, and retain deterministic Android Studio/CLI/CI selection guidance; no live Android validation was performed |
+| 2026-08-03 | Closed independent provisioning reviews | Commits `c8362d1` and `9e5d936` enforce one coherent SDK/AVD home, host-native metadata, root-serialized creation, collision recovery, current Android home variables, non-destructive profile preflight, and a post-install retry for image-contributed profiles |
+| 2026-08-03 | Committed the read-only doctor | Commit `9f85bbf` adds the CLI and fake-driven checks; its Android command allowlist is version, list, and acceleration diagnostics only |
+| 2026-08-03 | Completed final M10 validation | Full race tests with coverage, vet, lint with and without the integration tag, native and Windows builds, tagged example, module tidy/verify, formatting, YAML parsing, diff checks, and govulncheck pass; final council and API audits have no unresolved blockers |
 
 ## Next Action
 
-Implement and deterministically validate M10, then run the full release-quality
-suite and council review. Keep every commit local and do not start another
-existing host AVD. A later live integration run should use the newly provisioned
-720x1280 `small_phone`, non-Play `google_apis` host-native AVD and run serially.
-Push, PR creation, or other GitHub changes require a new user request.
+M10 is complete locally. Keep every commit local until the user explicitly
+requests a push. A later, separately authorized live integration run should
+provision and use one 720x1280 `small_phone`, non-Play `google_apis`
+host-native AVD, run serially, and stop if host pressure returns. Push, PR
+creation, or other GitHub changes require a new user request.

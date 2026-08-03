@@ -33,7 +33,7 @@ acceptance criteria, and recovery status.
 | M7 | Examples and public documentation | M6 | Complete | `67731ad`, `e1f5665`, `229ea36`, `99e6c1d` |
 | M8 | Cross-package council review and release-quality validation | M1–M7 | Complete locally | `31b3564`, `820400d`, `9019bb5` |
 | M9 | Host Android smoke and lightweight emulator profile | M8 | Complete locally; live run deliberately bounded | `b418420`, `a2522ef`, `e503bb0`, `3999a1c`, `6efa95b` |
-| M10 | Explicit AVD provisioning and environment doctor | M9 | In progress locally | — |
+| M10 | Explicit AVD provisioning and environment doctor | M9 | Complete locally; live provisioning deliberately deferred | `2d64228`, `3377dc4`, `c8362d1`, `9f85bbf`, `9e5d936` |
 
 ## Task Specifications and Acceptance Criteria
 
@@ -156,8 +156,8 @@ Acceptance criteria:
   override such as `swiftshader`.
 - Treat `am start -W`'s `Status: timeout` as a soft launch result only while a
   later bounded CDP connection remains responsible for proving readiness.
-- State clearly that the library starts and owns an existing AVD but does not
-  provision or download one.
+- State clearly that `Setup` starts and owns an existing AVD but does not
+  provision or download one; provisioning is a separate explicit API.
 - Cover the behavior through deterministic unit and static validation. Do not
   run another existing host AVD during this session.
 - Recommend a dedicated CI-oriented `small_phone` AVD: 720x1280,
@@ -182,6 +182,12 @@ Acceptance criteria:
 - Default provisioning to `small_phone`, `google_apis`, and the accelerated
   host-native ABI. Reject cross-architecture, Play Store, and ATD requests in
   this safe path.
+- Support provisioning on Linux x86_64 and native macOS amd64/arm64; reject
+  Windows provisioning for now without changing ordinary Setup of an existing
+  Windows AVD.
+- Require one coherent `ANDROID_HOME`/`ANDROID_SDK_ROOT`, plus an explicit
+  `ANDROID_AVD_HOME` whenever `ANDROID_USER_HOME`, `ANDROID_EMULATOR_HOME`, or
+  legacy `ANDROID_SDK_HOME` relocates Android state.
 - Never overwrite, delete, or silently rewrite an existing AVD. Verify its
   system image and hardware profile before reuse.
 - Keep SDK image installation explicitly opt-in because it can download
@@ -199,6 +205,12 @@ Acceptance criteria:
 - Cover both features with deterministic fakes; do not start a host emulator.
 - Update the session record after every material decision and validation pass,
   create focused local commits, and do not push.
+
+The provisioning API, doctor command, deterministic tests, and public
+documentation are complete locally. Full race, vet, lint, native/Windows
+build, tagged-example, module, formatting, YAML, and vulnerability checks pass,
+and final council/API audits are closed. No Android SDK package was installed,
+no AVD was changed, and no emulator was started during M10.
 
 ## External Follow-up
 

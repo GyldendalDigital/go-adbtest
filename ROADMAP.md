@@ -1,11 +1,11 @@
 # go-adbtest Roadmap
 
-Checked items below are implemented in local commits. The feature build,
-examples, documentation, council review, and local release validation are
-complete through Phase 9. Host Android tooling and a debuggable fixture were
-later found outside the initial workspace sandbox; Phase 9 bounded live work
-when the existing AVDs caused unacceptable host pressure. Detailed status
-lives in
+Checked items below are implemented locally. The feature build, examples,
+documentation, council review, and local release validation are complete
+through Phase 10. Host Android tooling and a debuggable fixture were found
+outside the initial workspace sandbox; Phase 9 bounded live work when the
+existing AVDs caused unacceptable host pressure, and Phase 10 deliberately
+used deterministic no-emulator validation. Detailed status lives in
 [docs/work-breakdown.md](docs/work-breakdown.md) and
 [docs/session.md](docs/session.md).
 
@@ -63,7 +63,8 @@ lives in
 - [x] `Teardown`, `RestartApp`, `ForceStop`
 - [x] `Config` with sensible defaults
 - [x] Explicit secondary-process WebView selection
-- [x] Explicit boundary: AVD/system-image provisioning remains consumer-owned
+- [x] Explicit boundary: `Setup` remains non-provisioning; provisioning is a
+  separate caller-initiated operation
 - [x] Integration test example
 
 ## Phase 7: Examples & Documentation
@@ -102,13 +103,13 @@ lives in
 > Make the safe local/self-hosted setup path repeatable without hiding large
 > downloads or emulator resource use.
 
-- [ ] `EnsureAVD` validates, reuses, or creates a matching lightweight AVD
-- [ ] System-image installation is explicit and licences remain developer-owned
-- [ ] Existing AVDs are verified and never overwritten
-- [ ] Provisioned AVDs compose directly with the safe `HeadlessAVD` profile
-- [ ] `adbtest doctor` checks tools, host ABI, acceleration, profiles, and AVDs
-- [ ] Doctor remains read-only, sequential, bounded, and dependency-free
-- [ ] Unit, race, vet, lint, build, tagged-example, and module checks pass
+- [x] `EnsureAVD` validates, reuses, or creates a matching lightweight AVD
+- [x] System-image installation is explicit and licences remain developer-owned
+- [x] Existing AVDs are verified and never overwritten
+- [x] Provisioned AVDs compose directly with the safe `HeadlessAVD` profile
+- [x] `adbtest doctor` checks tools, host ABI, acceleration, profiles, and AVDs
+- [x] Doctor remains read-only, sequential, bounded, and dependency-free
+- [x] Unit, race, vet, lint, build, tagged-example, and module checks pass
 
 ---
 
