@@ -1,9 +1,14 @@
 # Android WebView integration example
 
 This directory contains a generic consumer template for testing an Android app
-whose UI is rendered in a debuggable WebView. The tests demonstrate app
-restart and CDP interaction, plus opt-in WebView-to-DocumentsUI multi-file and
-Android runtime-permission flows.
+whose UI is rendered in a WebView that exposes remote debugging. The tests
+demonstrate app restart and CDP interaction, plus opt-in
+WebView-to-DocumentsUI multi-file and Android runtime-permission flows.
+
+Use a development/debug APK whose running WebView exposes remote debugging.
+The `app-debug.apk` names below are intentional; see
+[Preparing a CDP-ready APK](../README.md#preparing-a-cdp-ready-apk) before
+changing framework or release-build settings.
 
 The example is guarded by the `android_integration` build tag. It is therefore
 excluded from ordinary `go test ./...` runs. Even with the tag enabled, it safely

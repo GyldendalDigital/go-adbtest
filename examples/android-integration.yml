@@ -14,6 +14,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
+      # CDP needs a debug/development APK whose WebView exposes remote debugging.
       ADBTEST_APK: ${{ github.workspace }}/app/build/outputs/apk/debug/app-debug.apk
       ADBTEST_APP_PACKAGE: com.example.app
       # ADBTEST_APP_PROCESS: :webview # Uncomment for a secondary WebView process.
@@ -38,7 +39,7 @@ jobs:
 
       - name: Build APK
         run: |
-          # Replace this command and ADBTEST_APK with the consumer app's build.
+          # Replace this with the consumer app's debug/development build.
           ./gradlew assembleDebug
           test -f "$ADBTEST_APK"
 
