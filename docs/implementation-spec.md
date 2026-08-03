@@ -53,8 +53,11 @@ func TestWebViewFlow(t *testing.T) {
 }
 ```
 
-`go-adbtest` is not Wails-specific. The application only needs a debuggable
-WebView with WebView debugging enabled.
+`go-adbtest` is not Wails-specific. Its runtime requirement is that the
+application's WebView exposes a DevTools/CDP endpoint. A development/debug APK
+is the conventional safe test artifact, but manifest debuggability and an
+explicit WebView API call are not two independently mandatory settings; see the
+[README's CDP-ready APK guidance](../README.md#preparing-a-cdp-ready-apk).
 
 ## Architecture
 

@@ -554,7 +554,47 @@ go-adbtest/
   `avdmanager`) plus `ANDROID_HOME` or `ANDROID_SDK_ROOT`, on Linux x86_64 or
   native macOS amd64/arm64
 - For package auto-detection: Android build-tools (`aapt`)
-- A debuggable WebView whose app enables WebView debugging
+- An application WebView that exposes remote debugging; see below
+
+### Preparing a CDP-ready APK
+
+`device.CDP` requires the running WebView to expose a DevTools/CDP endpoint.
+The normal, safe test artifact is a development/debug APK. The Android Gradle
+Plugin's standard `debug` build type sets `android:debuggable="true"` in the
+merged manifest, and WebView 113 or later enables WebView debugging
+automatically for such applications. For older WebView providers or a custom
+Android host, enable it explicitly only in debug builds:
+
+```java
+if (BuildConfig.DEBUG) {
+    WebView.setWebContentsDebuggingEnabled(true);
+}
+```
+
+Framework scaffolds often configure this already. Wails v3 Android scaffolding
+normally produces a CDP-ready generated debug APK, so try that artifact before
+changing Wails or generated Android sources. If CDP connection still fails,
+inspect the app's local Gradle and activity sources because the
+generated host is customizable and version-specific. Do not enable WebView
+debugging in a production build because an ADB user could inspect and modify
+its WebView contents. See Android's documentation for
+[build variants](https://developer.android.com/build/build-variants) and
+[`setWebContentsDebuggingEnabled`](https://developer.android.com/reference/android/webkit/WebView#setWebContentsDebuggingEnabled(boolean)).
+
+Optionally check the packaged APK's manifest setting with Android SDK
+[APK Analyzer](https://developer.android.com/tools/apkanalyzer):
+
+```sh
+apkanalyzer manifest debuggable path/to/app-debug.apk
+```
+
+For the conventional debug-build path, this should print `true`. It checks only
+the packaged manifest and is not independently a go-adbtest requirement; the
+runtime requirement is a reachable CDP endpoint. A successful go-adbtest CDP
+connection is that runtime proof. A failed connection can also mean that the
+configured process is wrong, the WebView has not started, or ADB forwarding
+failed. `adbtest doctor` remains a read-only host-environment check and
+intentionally does not install, launch, or inspect the application.
 
 ## Testing
 
