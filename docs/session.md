@@ -176,6 +176,7 @@ socket/forward ownership, current emulator GPU defaults, and all lint findings.
 | 2026-07-31 | Completed final M9 validation | Full race, vet, lint (normal and tagged), builds, module checks, tagged example, YAML parsing, diff checks, and govulncheck pass; no emulator was started |
 | 2026-07-31 | Expanded public AVD and API guidance | README now distinguishes AVD names, hardware profiles, and ADB serials; documents Android Studio, CLI, and deterministic CI selection; and explains CDP, native UI, permissions, lifecycle, and ADB usage. No emulator was started |
 | 2026-08-03 | Began M10 provisioning and doctor design | Council selected explicit safe-profile provisioning, opt-in image installation, strict non-overwriting reuse, and a read-only stdlib doctor; no emulator was started |
+| 2026-08-03 | Implemented explicit AVD provisioning | Added shared SDK resolution/command helpers plus strict profile validation, opt-in image installation, non-overwriting creation, post-create verification, and direct safe-launch composition; targeted race, vet, lint, format, and diff checks pass without starting an emulator |
 
 ## Next Action
 
