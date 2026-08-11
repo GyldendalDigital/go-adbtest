@@ -41,8 +41,8 @@ type Client struct {
 }
 
 // RecoveryPolicy controls bounded recovery of a polling operation after CDP
-// transport loss. A zero value allows one reconnect; use a negative
-// MaxReconnects to disable recovery.
+// transport loss. MaxReconnects == 0 uses the default of one reconnect; use
+// a negative MaxReconnects to disable recovery.
 type RecoveryPolicy struct {
 	MaxReconnects int
 }
@@ -244,8 +244,8 @@ func (c *Client) waitForSelectorContext(ctx context.Context, cssSelector string)
 }
 
 // WaitForSelectorContext polls until a CSS selector matches a visible
-// element. A transport failure may cause up to policy.MaxReconnects bounded
-// reconnects; the context's original deadline is preserved.
+// element. Transport recovery follows policy (one reconnect for its zero
+// value), and the context's original deadline is preserved.
 func (c *Client) WaitForSelectorContext(ctx context.Context, cssSelector string, policy RecoveryPolicy) error {
 	if ctx == nil {
 		return fmt.Errorf("wait for selector %q: nil context", cssSelector)

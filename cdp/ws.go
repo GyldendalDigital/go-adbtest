@@ -29,14 +29,25 @@ type TransportError struct {
 	Err error
 }
 
-func (e *TransportError) Error() string { return e.Err.Error() }
-func (e *TransportError) Unwrap() error { return e.Err }
+func (e *TransportError) Error() string {
+	if e == nil || e.Err == nil {
+		return "CDP transport error"
+	}
+	return e.Err.Error()
+}
+
+func (e *TransportError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
 
 // IsTransportError reports whether err indicates that the CDP connection is
 // no longer usable and may be recreated.
 func IsTransportError(err error) bool {
 	var transportErr *TransportError
-	return errors.As(err, &transportErr)
+	return errors.As(err, &transportErr) && transportErr != nil
 }
 
 func transportError(err error) error {

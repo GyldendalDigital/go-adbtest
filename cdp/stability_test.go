@@ -60,6 +60,26 @@ func TestConnProtocolErrorIsReturned(t *testing.T) {
 	}
 }
 
+func TestTransportErrorZeroValuesAreSafe(t *testing.T) {
+	var nilTransportErr *TransportError
+	for name, transportErr := range map[string]*TransportError{
+		"nil pointer": nilTransportErr,
+		"zero value":  {},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := transportErr.Error(); got != "CDP transport error" {
+				t.Fatalf("TransportError.Error() = %q, want default message", got)
+			}
+			if got := transportErr.Unwrap(); got != nil {
+				t.Fatalf("TransportError.Unwrap() = %v, want nil", got)
+			}
+		})
+	}
+	if IsTransportError(nilTransportErr) {
+		t.Fatal("typed-nil TransportError should not be classified as transport error")
+	}
+}
+
 func TestConnDisconnectFailsAllPendingSends(t *testing.T) {
 	const sendCount = 12
 	srv := mockCDPServer(t, func(ctx context.Context, ws *websocket.Conn) {
