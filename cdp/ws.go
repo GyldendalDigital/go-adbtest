@@ -22,6 +22,30 @@ const (
 
 var errConnectionClosed = errors.New("CDP connection closed")
 
+// TransportError marks a failure of the CDP transport rather than a failure
+// reported by the browser. Polling helpers may use this distinction to
+// reconnect without retrying protocol errors or JavaScript failures.
+type TransportError struct {
+	Err error
+}
+
+func (e *TransportError) Error() string { return e.Err.Error() }
+func (e *TransportError) Unwrap() error { return e.Err }
+
+// IsTransportError reports whether err indicates that the CDP connection is
+// no longer usable and may be recreated.
+func IsTransportError(err error) bool {
+	var transportErr *TransportError
+	return errors.As(err, &transportErr)
+}
+
+func transportError(err error) error {
+	if err == nil || IsTransportError(err) {
+		return err
+	}
+	return &TransportError{Err: err}
+}
+
 type commandResponse struct {
 	result json.RawMessage
 	err    error
@@ -159,7 +183,7 @@ func (c *Conn) SendContext(ctx context.Context, method string, params map[string
 		return nil, fmt.Errorf("CDP %s: nil context", method)
 	}
 	if c == nil || c.ws == nil {
-		return nil, fmt.Errorf("CDP %s: connection is not initialized", method)
+		return nil, fmt.Errorf("CDP %s: %w", method, transportError(errors.New("connection is not initialized")))
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("CDP %s: %w", method, err)
@@ -182,7 +206,7 @@ func (c *Conn) SendContext(ctx context.Context, method string, params map[string
 	responseCh := make(chan commandResponse, 1)
 	c.mu.Lock()
 	if c.terminalErr != nil {
-		err := c.terminalErr
+		err := transportError(c.terminalErr)
 		c.mu.Unlock()
 		return nil, fmt.Errorf("CDP %s: %w", method, err)
 	}
@@ -219,7 +243,7 @@ func (c *Conn) handleWriteFailure(ctx context.Context, writeErr error) error {
 		return ctxErr
 	}
 
-	connectionErr := fmt.Errorf("CDP connection write failed: %w", writeErr)
+	connectionErr := transportError(fmt.Errorf("CDP connection write failed: %w", writeErr))
 	c.terminate(connectionErr)
 	if closeErr := c.closeNow(); closeErr != nil {
 		return errors.Join(connectionErr, fmt.Errorf("close failed CDP connection: %w", closeErr))
@@ -241,7 +265,7 @@ func (c *Conn) close(graceful bool) error {
 	if c == nil || c.ws == nil {
 		return nil
 	}
-	c.terminate(errConnectionClosed)
+	c.terminate(transportError(errConnectionClosed))
 	c.wsCloseOnce.Do(func() {
 		if graceful {
 			c.wsCloseErr = c.ws.Close(websocket.StatusNormalClosure, "closing")
@@ -281,7 +305,7 @@ func (c *Conn) readLoop() {
 			case <-c.done:
 				return
 			default:
-				c.terminate(fmt.Errorf("CDP connection read failed: %w", err))
+				c.terminate(transportError(fmt.Errorf("CDP connection read failed: %w", err)))
 				_ = c.closeNow()
 				return
 			}

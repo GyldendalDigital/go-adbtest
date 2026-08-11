@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -43,6 +44,9 @@ func TestConnProtocolErrorIsReturned(t *testing.T) {
 	result, err := conn.Send("Missing.method", nil)
 	if err == nil {
 		t.Fatalf("Send() = (%s, nil), want protocol error", result)
+	}
+	if IsTransportError(err) {
+		t.Fatalf("Send() protocol error was marked transport-retryable: %v", err)
 	}
 	if result != nil {
 		t.Fatalf("Send() result = %s, want nil", result)
@@ -475,6 +479,50 @@ func TestWaitForSelectorUsesVisibilityExpression(t *testing.T) {
 		if !strings.Contains(expression, required) {
 			t.Errorf("visibility expression missing %q:\n%s", required, expression)
 		}
+	}
+}
+
+func TestWaitForSelectorRecoversOnceAfterTransportLoss(t *testing.T) {
+	var connections atomic.Int32
+	srv := mockCDPServer(t, func(ctx context.Context, ws *websocket.Conn) {
+		if connections.Add(1) == 1 {
+			readCDPRequest(t, ctx, ws)
+			_ = ws.CloseNow()
+			return
+		}
+		readCDPRequest(t, ctx, ws)
+		writeCDPMessage(t, ctx, ws, map[string]any{
+			"id":     1,
+			"result": map[string]any{"result": map[string]any{"type": "boolean", "value": true}},
+		})
+	})
+	defer srv.Close()
+
+	adbClient := fakeCDPADB(t, `
+if [ "${1-}" = "shell" ]; then
+    case "${2-}" in
+        "pidof com.example.app") printf '%s\n' '4242' ;;
+        "cat /proc/net/unix") printf '%s\n' '00000000: 00000002 00000000 00010000 0001 01 4242 @webview_devtools_remote_4242' ;;
+        *) exit 97 ;;
+    esac
+    exit 0
+fi
+if [ "${1-}" = "forward" ]; then exit 0; fi
+exit 97
+`)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	client, err := NewClientContext(ctx, adbClient, "com.example.app", serverPort(t, srv))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	if err := client.WaitForSelectorContext(ctx, "#ready", RecoveryPolicy{}); err != nil {
+		t.Fatalf("WaitForSelectorContext() error: %v", err)
+	}
+	if got := connections.Load(); got != 2 {
+		t.Fatalf("WebSocket connections = %d, want one reconnect", got)
 	}
 }
 

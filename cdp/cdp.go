@@ -40,6 +40,25 @@ type Client struct {
 	forwardSocket string
 }
 
+// RecoveryPolicy controls bounded recovery of a polling operation after CDP
+// transport loss. A zero value allows one reconnect; use a negative
+// MaxReconnects to disable recovery.
+type RecoveryPolicy struct {
+	MaxReconnects int
+}
+
+const defaultMaxReconnects = 1
+
+func (p RecoveryPolicy) maxReconnects() int {
+	if p.MaxReconnects < 0 {
+		return 0
+	}
+	if p.MaxReconnects == 0 {
+		return defaultMaxReconnects
+	}
+	return p.MaxReconnects
+}
+
 // NewClient creates a CDP client, sets up port forwarding, and connects.
 func NewClient(adbClient *adb.Client, appPackage string, localPort int) (*Client, error) {
 	return NewClientForProcess(adbClient, appPackage, appPackage, localPort)
@@ -215,19 +234,35 @@ func (c *Client) WaitForSelector(t testing.TB, cssSelector string, timeout time.
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	if err := c.waitForSelectorContext(ctx, cssSelector); err != nil {
+	if err := c.WaitForSelectorContext(ctx, cssSelector, RecoveryPolicy{}); err != nil {
 		t.Fatalf("WaitForSelector(%q): timeout after %v: %v", cssSelector, timeout, err)
 	}
 }
 
 func (c *Client) waitForSelectorContext(ctx context.Context, cssSelector string) error {
+	return c.WaitForSelectorContext(ctx, cssSelector, RecoveryPolicy{})
+}
+
+// WaitForSelectorContext polls until a CSS selector matches a visible
+// element. A transport failure may cause up to policy.MaxReconnects bounded
+// reconnects; the context's original deadline is preserved.
+func (c *Client) WaitForSelectorContext(ctx context.Context, cssSelector string, policy RecoveryPolicy) error {
 	if ctx == nil {
 		return fmt.Errorf("wait for selector %q: nil context", cssSelector)
 	}
 	js := visibleSelectorExpression(cssSelector)
+	reconnects := 0
 	for {
 		result, err := c.EvalContext(ctx, js)
 		if err != nil {
+			if IsTransportError(err) && reconnects < policy.maxReconnects() && c != nil && c.ADB != nil {
+				reconnects++
+				reconnectErr := c.ReconnectContext(ctx)
+				if reconnectErr == nil {
+					continue
+				}
+				return fmt.Errorf("recover selector %q after transport failure: %w", cssSelector, errors.Join(err, reconnectErr))
+			}
 			return fmt.Errorf("evaluate selector %q: %w", cssSelector, err)
 		}
 		if result == "true" {
@@ -260,7 +295,7 @@ func (c *Client) WaitForText(t testing.TB, cssSelector, text string, timeout tim
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	result, err := c.waitForTextContext(ctx, cssSelector, text)
+	result, err := c.WaitForTextContext(ctx, cssSelector, text, RecoveryPolicy{})
 	if err != nil {
 		t.Fatalf("WaitForText(%q, %q): timeout after %v: %v", cssSelector, text, timeout, err)
 		return ""
@@ -269,14 +304,29 @@ func (c *Client) WaitForText(t testing.TB, cssSelector, text string, timeout tim
 }
 
 func (c *Client) waitForTextContext(ctx context.Context, cssSelector, text string) (string, error) {
+	return c.WaitForTextContext(ctx, cssSelector, text, RecoveryPolicy{})
+}
+
+// WaitForTextContext polls until an element's textContent contains text.
+// Transport recovery is bounded by policy and shares ctx's original deadline.
+func (c *Client) WaitForTextContext(ctx context.Context, cssSelector, text string, policy RecoveryPolicy) (string, error) {
 	if ctx == nil {
 		return "", fmt.Errorf("wait for text on selector %q: nil context", cssSelector)
 	}
 	js := fmt.Sprintf(`document.querySelector(%q)?.textContent ?? ""`, cssSelector)
 	var lastContent string
+	reconnects := 0
 	for {
 		result, err := c.EvalContext(ctx, js)
 		if err != nil {
+			if IsTransportError(err) && reconnects < policy.maxReconnects() && c != nil && c.ADB != nil {
+				reconnects++
+				reconnectErr := c.ReconnectContext(ctx)
+				if reconnectErr == nil {
+					continue
+				}
+				return "", fmt.Errorf("recover text %q on selector %q after transport failure: %w", text, cssSelector, errors.Join(err, reconnectErr))
+			}
 			return "", fmt.Errorf("evaluate text for selector %q: %w", cssSelector, err)
 		}
 		lastContent = result
