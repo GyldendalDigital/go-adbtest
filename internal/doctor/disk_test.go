@@ -213,9 +213,46 @@ func TestCheckDiskSpaceOffersOnlyRemediesThatCanWork(t *testing.T) {
 			}
 		})
 	}
-	result := diskResult(t, Options{AVD: "expected_avd"}, coldAVD("20G"), 1<<20)
+	// Nor when lowering could not close the gap on its own: at 1 MiB free, even
+	// the smallest partition the emulator will create does not fit.
+	hopeless := diskResult(t, Options{AVD: "expected_avd"}, coldAVD("20G"), 1<<20)
+	if strings.Contains(hopeless.Hint, "lower disk.dataPartition.size") {
+		t.Fatalf("hint %q offers an alternative that would not fit either", hopeless.Hint)
+	}
+
+	// With room for a 6G partition, lowering a 20G one is a genuine remedy.
+	result := diskResult(t, Options{AVD: "expected_avd"}, coldAVD("20G"), 8<<30)
 	if !strings.Contains(result.Hint, "lower disk.dataPartition.size") {
 		t.Fatalf("hint %q omits the one remedy that would work here", result.Hint)
+	}
+	if !strings.Contains(result.Hint, "6G") {
+		t.Fatalf("hint %q does not name a value that can be typed into config.ini", result.Hint)
+	}
+}
+
+// Below API 24 the emulator's 6 GiB minimum is feature-flagged, so a
+// requirement derived from raising a smaller size is not certain enough to fail
+// a host that may well boot.
+func TestCheckDiskSpaceWillNotFailOnAnUncertainRaise(t *testing.T) {
+	values := map[string]string{"disk.dataPartition.size": "2G", "target": "android-23"}
+	disk := avdDiskInfo{Values: values, Directory: avdDirectory}
+
+	deps, _ := diskDependencies("expected_avd", disk, incidentAvailable)
+	report := runDiskCheck(t, Options{AVD: "expected_avd"}, deps)
+
+	result := findResult(t, report, "disk space")
+	if result.Severity != Warning {
+		t.Fatalf("disk space result = %+v, want Warning where the raise is uncertain", result)
+	}
+	if report.ExitCode() != 0 {
+		t.Fatalf("ExitCode() = %d, want 0", report.ExitCode())
+	}
+
+	// The same AVD on a modern image is a certain shortfall.
+	values["target"] = "android-35"
+	deps, _ = diskDependencies("expected_avd", disk, incidentAvailable)
+	if result = findResult(t, runDiskCheck(t, Options{AVD: "expected_avd"}, deps), "disk space"); result.Severity != Failure {
+		t.Fatalf("disk space result = %+v, want Failure from API 24 up", result)
 	}
 }
 

@@ -271,6 +271,14 @@ func (c *checker) checkDiskSpace() {
 	dataSize, origin := dataPartitionBytes(disk.Values)
 	required := requiredBytes(dataSize)
 	comfortable := addWithoutOverflow(required, diskHeadroom)
+	// A shortfall is only worth failing on when the requirement behind it is
+	// certain. Below API 24 the emulator gates its 6 GiB minimum behind a
+	// feature flag, so a smaller configured partition may be honoured and this
+	// requirement may be an overestimate.
+	shortfall := Failure
+	if origin == sizeRaised && raisedSizeIsUncertain(disk.Values) {
+		shortfall = Warning
+	}
 
 	switch {
 	case available >= comfortable:
@@ -291,11 +299,11 @@ func (c *checker) checkDiskSpace() {
 		})
 	case available < required:
 		c.add(Result{
-			Severity: Failure,
+			Severity: shortfall,
 			Name:     "disk space",
 			Detail: fmt.Sprintf("AVD %q needs %s to create its userdata partition%s but %s has %s free",
 				c.options.AVD, formatMiB(required), describeOrigin(origin, formatMiB), measured, formatMiB(available)),
-			Hint: c.shortfallHint(required-available, measured, dataSize, origin),
+			Hint: c.shortfallHint(required-available, available, dataSize, measured, origin),
 		})
 	default:
 		c.add(Result{
@@ -315,10 +323,16 @@ func (c *checker) checkDiskSpace() {
 // emulator's minimum, because the emulator raises anything smaller straight
 // back - and a consumer acting on this output automatically would otherwise
 // edit config.ini, rerun, and see an identical failure indefinitely.
-func (c *checker) shortfallHint(deficit uint64, measured string, dataSize uint64, origin sizeOrigin) string {
+func (c *checker) shortfallHint(deficit, available, dataSize uint64, measured string, origin sizeOrigin) string {
 	hint := fmt.Sprintf("free at least %s on the volume holding %s, or point ANDROID_AVD_HOME at a larger volume",
 		formatMiB(deficit), measured)
-	if (origin == sizeConfigured || origin == sizeCapped) && dataSize > emulatorDataPartitionFloor {
+	// Offered only when lowering the size could close the gap on its own: the
+	// emulator raises anything below 6G straight back, so at or under the floor
+	// the suggestion is futile, and below the floor's own requirement there is
+	// no size that would fit either.
+	if (origin == sizeConfigured || origin == sizeCapped) &&
+		dataSize > emulatorDataPartitionFloor &&
+		available >= requiredBytes(emulatorDataPartitionFloor) {
 		// 6G rather than a rendered size: this is a value to type into config.ini.
 		hint += ", or lower disk.dataPartition.size in that AVD's config.ini to no less than 6G, the emulator's minimum"
 	}
@@ -441,6 +455,15 @@ func describeOrigin(origin sizeOrigin, format func(uint64) string) string {
 	default: // sizeConfigured
 		return ""
 	}
+}
+
+// raisedSizeIsUncertain reports whether the AVD targets an API level where the
+// emulator's 6 GiB minimum is feature-flagged rather than unconditional, so a
+// requirement derived from raising a smaller size cannot be relied on.
+func raisedSizeIsUncertain(values map[string]string) bool {
+	target := strings.TrimPrefix(strings.TrimSpace(values["target"]), "android-")
+	level, err := strconv.Atoi(target)
+	return err == nil && level < 24
 }
 
 func doctorCommand(avd string) string {

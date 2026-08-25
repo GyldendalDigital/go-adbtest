@@ -164,10 +164,11 @@ func normalizeOptions(options Options) (Options, error) {
 	return options, nil
 }
 
-// Func fields are checked by reflection rather than by name so that a newly
-// added dependency cannot be wired into production but omitted here, or the
-// reverse. Either mistake fails every real run while a hand-maintained list
-// keeps the test suite green.
+// Every func-typed dependency is checked by reflection rather than by name, so
+// that a newly added one cannot be wired into production but omitted here, or
+// the reverse: either mistake fails every real run while a hand-maintained list
+// keeps the test suite green. Dependencies of other kinds still need their own
+// condition below.
 //
 //nolint:gocritic // Validation deliberately receives the complete immutable seam.
 func validateDependencies(deps dependencies) error {
