@@ -70,11 +70,19 @@ type dependencies struct {
 	findTool       func(string, string) (string, error)
 	avdHomes       func() ([]string, error)
 	run            func(context.Context, string, []string, io.Reader, io.Writer) (androidsdk.CommandResult, error)
+	// availableDiskBytes measures unprivileged-available space on the
+	// filesystem holding a path. Injected so the disk check stays hermetic:
+	// nothing in this package touches the host filesystem directly.
+	availableDiskBytes func(string) (uint64, error)
+	// avdDisk reads an AVD's config.ini and reports whether its userdata
+	// partition already exists.
+	avdDisk        func(string, []string) (avdDiskInfo, bool, error)
 	commandTimeout time.Duration
 }
 
 // Check runs the read-only provisioning checks sequentially on Linux and
-// macOS. It never starts an ADB
+// macOS. It reads an AVD's config.ini and measures free space, but never
+// starts an ADB
 // server or emulator, contacts a device or repository, installs an SDK package,
 // accepts a licence, or creates or changes an AVD.
 func Check(ctx context.Context, options Options) (Report, error) {
@@ -83,15 +91,17 @@ func Check(ctx context.Context, options Options) (Report, error) {
 
 func productionDependencies() dependencies {
 	return dependencies{
-		goos:           runtime.GOOS,
-		goarch:         runtime.GOARCH,
-		getenv:         os.Getenv,
-		lookPath:       exec.LookPath,
-		resolveSDKRoot: androidsdk.ResolveSDKRoot,
-		findTool:       androidsdk.FindTool,
-		avdHomes:       androidsdk.AVDHomes,
-		run:            androidsdk.Run,
-		commandTimeout: defaultCommandTimeout,
+		goos:               runtime.GOOS,
+		goarch:             runtime.GOARCH,
+		getenv:             os.Getenv,
+		lookPath:           exec.LookPath,
+		resolveSDKRoot:     androidsdk.ResolveSDKRoot,
+		findTool:           androidsdk.FindTool,
+		avdHomes:           androidsdk.AVDHomes,
+		run:                androidsdk.Run,
+		availableDiskBytes: availableDiskBytes,
+		avdDisk:            productionAVDDisk,
+		commandTimeout:     defaultCommandTimeout,
 	}
 }
 
@@ -122,6 +132,7 @@ func checkWithDependencies(ctx context.Context, options Options, deps dependenci
 	checker.checkAVDManager()
 	checker.checkAcceleration()
 	checker.checkAVDs()
+	checker.checkDiskSpace()
 	checker.checkAAPT()
 	checker.add(scopeResult())
 	return checker.report, nil
@@ -131,7 +142,7 @@ func scopeResult() Result {
 	return Result{
 		Severity: Information,
 		Name:     "scope",
-		Detail:   "SDK licences, network access, disk capacity, and WebView debugging were not probed",
+		Detail:   "SDK licences, network access, system-image download capacity, and WebView debugging were not probed",
 		Hint:     "EnsureAVD reports licence and image-install remediation; the app must enable WebView debugging",
 	}
 }
@@ -155,7 +166,8 @@ func normalizeOptions(options Options) (Options, error) {
 func validateDependencies(deps dependencies) error {
 	if strings.TrimSpace(deps.goos) == "" || strings.TrimSpace(deps.goarch) == "" ||
 		deps.getenv == nil || deps.lookPath == nil || deps.resolveSDKRoot == nil ||
-		deps.findTool == nil || deps.avdHomes == nil || deps.run == nil {
+		deps.findTool == nil || deps.avdHomes == nil || deps.run == nil ||
+		deps.availableDiskBytes == nil || deps.avdDisk == nil {
 		return errors.New("doctor: internal dependencies are incomplete")
 	}
 	if deps.commandTimeout <= 0 {
@@ -171,6 +183,9 @@ type checker struct {
 	report   Report
 	sdkRoot  string
 	emulator string
+	// avdHomes is cached from checkAVDEnvironment so the disk check cannot
+	// measure a different home than the one already reported.
+	avdHomes []string
 }
 
 func (c *checker) add(result Result) {
@@ -264,6 +279,7 @@ func (c *checker) checkAVDEnvironment() {
 		c.add(Result{Severity: Failure, Name: "AVD home", Detail: "no Android AVD directory could be resolved"})
 		return
 	}
+	c.avdHomes = homes
 	c.add(Result{Severity: OK, Name: "AVD home", Detail: homes[0]})
 }
 
