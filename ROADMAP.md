@@ -111,6 +111,20 @@ used deterministic no-emulator validation. Detailed status lives in
 - [x] Doctor remains read-only, sequential, bounded, and dependency-free
 - [x] Unit, race, vet, lint, build, tagged-example, and module checks pass
 
+## Phase 11: Disk Capacity Preflight
+> Catch the emulator's userdata-partition space check before it fails as a
+> misleading boot timeout.
+
+- [x] `adbtest doctor` measures free space where an AVD's files actually live
+- [x] Requirement derived from the AVD's own `disk.dataPartition.size`, using
+  the emulator's measured 1.2x multiplier rather than an invented threshold
+- [x] Creation-only semantics: an AVD that already has a userdata partition is
+  a warning, never a failure
+- [x] Failure reachable only with `--avd`, so no existing invocation newly fails
+- [x] AVD metadata resolution moved to `internal/androidsdk` behind one entry
+  point, with the previously untested resolution paths characterized first
+- [x] Cross-compilation of the build-tagged hosts added to CI
+
 ---
 
 ## Non-Goals (v1)

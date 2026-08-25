@@ -25,13 +25,45 @@ adbtest doctor --avd small_phone_api_35
 
 `adbtest doctor` is read-only. It runs sequential, bounded checks for Go, the
 Android SDK root, `adb`, the emulator, Command-line Tools, the requested
-hardware profile, VM acceleration, configured AVD names, and optional `aapt`.
+hardware profile, VM acceleration, configured AVD names, free space for the
+AVD's userdata partition, and optional `aapt`.
 It does not start an emulator or ADB server, contact a device or package
 repository, install packages, accept licences, or change an AVD. Exit code 0
 means no required check failed (warnings are allowed), 1 means the environment
 is not ready, and 2 means the command or its arguments could not be processed.
 Use `--device-profile ID` when provisioning something other than the default
 `small_phone` hardware profile.
+
+### Free space for the userdata partition
+
+The emulator refuses to create an AVD's userdata partition unless the
+filesystem holding the AVD content directory has **1.2x** the configured
+`disk.dataPartition.size` free. It reports the shortfall as `Not enough space
+to create userdata partition`, but that message goes to the emulator's own
+output: what a CI log usually shows is `could not connect to TCP port 5554:
+Connection refused` or `Timeout waiting for emulator to boot`, both of which
+read like a slow boot and are not one.
+
+Two figures are worth budgeting for, and they differ by provenance:
+
+| AVD | `disk.dataPartition.size` | Free space needed |
+| --- | --- | --- |
+| Created by `EnsureAVD` or `avdmanager` | `10G` | **12.0 GiB** |
+| No configured size (the emulator's default) | 6 GiB | **7.2 GiB** |
+
+`adbtest doctor --avd NAME` compares that AVD's own configuration against the
+free space where its files live. Without `--avd` it reports free space against
+the smallest requirement any AVD can have, and never fails, because it cannot
+know which AVD will be booted.
+
+The emulator applies this check only when it **creates** the partition, so an
+AVD that has already booted keeps working below the threshold and doctor
+reports it as a warning rather than a failure. This is why the problem tends to
+appear on ephemeral CI runners and never on a workstation.
+
+On macOS, the measurement excludes purgeable space and local snapshots, so it
+can read well below what Finder shows. The emulator measures the same way, so
+doctor's verdict still matches the emulator's.
 
 ## Quick start
 
@@ -689,8 +721,8 @@ On a persistent self-hosted runner, the library can own an AVD instead. Create
 it once under a stable name—manually or through a separately bounded
 `EnsureAVD` bootstrap step—then check prerequisite health and exact-name
 presence with `adbtest doctor --avd NAME` and pass that name to `HeadlessAVD`.
-Doctor does not validate that AVD's image or lightweight profile; `EnsureAVD`
-does that. Keep the large system-image download out of the normal test hot path
+Doctor reads that AVD's `config.ini` to size its userdata partition, but does
+not validate its image or lightweight profile; `EnsureAVD` does that. Keep the large system-image download out of the normal test hot path
 when possible. Do not manually start that same AVD first. In either CI mode,
 keep `go test -p=1` so multiple package-level `TestMain` functions do not
 launch emulators concurrently.

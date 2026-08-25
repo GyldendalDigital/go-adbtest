@@ -609,18 +609,23 @@ adbtest doctor [--avd NAME] [--device-profile PROFILE]
 ```
 
 The doctor is a stdlib-only, log-friendly diagnostic command. In stable order
-and with a 15-second bound per external command, it checks Go 1.23+, the stable
+and with a 15-second bound per external command and per free-space
+measurement, it checks Go 1.23+, the stable
 Android SDK and AVD homes, supported host ABI, `adb`, emulator, `sdkmanager`,
 `avdmanager`, the hardware-profile ID, VM acceleration, configured AVD names,
-and optional `aapt`. `--avd` requires only the exact name to appear in the
-emulator's read-only listing; `EnsureAVD`, not doctor, validates that AVD's
-metadata and profile. `--device-profile` defaults to `small_phone`.
+free space for the userdata partition, and optional `aapt`. `--avd` requires
+the exact name to appear in the emulator's read-only listing, and reads that
+AVD's `config.ini` for its partition sizes; `EnsureAVD`, not doctor, validates
+that AVD's metadata and profile. `--device-profile` defaults to `small_phone`.
 
 It invokes only read-only version/list/acceleration commands. It never starts
 an emulator or ADB server, contacts a device or package repository, installs or
 updates an SDK package, accepts a licence, or creates or changes an AVD. It
-also states that licences, network access, disk capacity, and application
-WebView debugging remain outside its probe scope. Output uses stable ASCII
+also states that licences, network access, system-image download capacity, and
+application WebView debugging remain outside its probe scope. The free-space
+check covers the filesystem holding the AVD content directory only; it does not
+probe the SDK root, which frequently lives on another filesystem, nor the lazy
+growth of a userdata image during a run. Output uses stable ASCII
 `[OK]`, `[WARN]`, `[FAIL]`, and `[INFO]` labels. Exit code 0 means there is no
 required failure, 1 means one or more readiness checks failed, and 2 means a
 usage or check-invocation error prevented a report.

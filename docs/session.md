@@ -192,11 +192,18 @@ socket/forward ownership, current emulator GPU defaults, and all lint findings.
 | 2026-08-03 | Closed independent provisioning reviews | Commits `c8362d1` and `9e5d936` enforce one coherent SDK/AVD home, host-native metadata, root-serialized creation, collision recovery, current Android home variables, non-destructive profile preflight, and a post-install retry for image-contributed profiles |
 | 2026-08-03 | Committed the read-only doctor | Commit `9f85bbf` adds the CLI and fake-driven checks; its Android command allowlist is version, list, and acceleration diagnostics only |
 | 2026-08-03 | Completed final M10 validation | Full race tests with coverage, vet, lint with and without the integration tag, native and Windows builds, tagged example, module tidy/verify, formatting, YAML parsing, diff checks, and govulncheck pass; final council and API audits have no unresolved blockers |
+| 2026-08-25 | Added the disk-capacity preflight | Characterized the untested AVD metadata resolution paths, moved them to `internal/androidsdk` behind `AVDConfig`, and added `checkDiskSpace`; the emulator's 1.2x userdata requirement and its creation-only semantics were measured against emulator 36.6.11.0 rather than inferred, and CI now cross-compiles the build-tagged hosts |
 
 ## Next Action
 
-M10 is complete locally. Keep every commit local until the user explicitly
-requests a push. A later, separately authorized live integration run should
-provision and use one 720x1280 `small_phone`, non-Play `google_apis`
-host-native AVD, run serially, and stop if host pressure returns. Push, PR
-creation, or other GitHub changes require a new user request.
+Phase 11 adds the disk-capacity preflight on `feat/doctor-disk-capacity-check`,
+authorized for push and PR by the maintainer on 2026-08-25. Two related items
+were planned alongside it and are not started: attaching the emulator's own
+startup output to boot failures, since `emulator.Start` currently sends it to
+os.Stdout and returns a bare exit status; and a composite action plus an
+emulator job for this repository's own CI, which today never boots an emulator
+at all.
+
+A later, separately authorized live integration run should provision and use
+one 720x1280 `small_phone`, non-Play `google_apis` host-native AVD, run
+serially, and stop if host pressure returns.
