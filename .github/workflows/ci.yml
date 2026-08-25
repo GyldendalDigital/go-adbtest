@@ -46,6 +46,17 @@ jobs:
       - name: Build
         run: go build ./...
 
+      # CI runs on Linux only, so nothing else compiles the build-tagged files.
+      # The doctor's free-space measurement has a linux||darwin implementation
+      # and a fallback for every other host, and the darwin path differs in a
+      # way the Linux build cannot catch: Statfs_t.Bsize is int64 on Linux and
+      # uint32 on macOS.
+      - name: Cross-compile the build-tagged hosts
+        run: |
+          GOOS=darwin GOARCH=arm64 go build ./...
+          GOOS=darwin GOARCH=amd64 go build ./...
+          GOOS=windows GOARCH=amd64 go build ./...
+
       - name: Verify go.mod is tidy
         run: |
           go mod tidy
