@@ -373,7 +373,7 @@ func healthyDependencies() (dependencies, *[]string) {
 		},
 		// Comfortably above any requirement so the disk check is inert unless a
 		// test overrides it deliberately.
-		availableDiskBytes: func(string) (uint64, error) { return 512 << 30, nil },
+		availableDiskBytes: func(path string) (uint64, string, error) { return 512 << 30, path, nil },
 		avdDisk: func(string, []string) (avdDiskInfo, bool, error) {
 			return avdDiskInfo{}, false, nil
 		},

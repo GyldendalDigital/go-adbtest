@@ -13,12 +13,15 @@ import (
 // space, which would be the flakiness vector.
 
 func TestAvailableDiskBytesMeasuresARealFilesystem(t *testing.T) {
-	got, err := availableDiskBytes(t.TempDir())
+	got, measured, err := availableDiskBytes(t.TempDir())
 	if err != nil {
 		t.Fatalf("availableDiskBytes() error: %v", err)
 	}
 	if got == 0 {
 		t.Fatal("availableDiskBytes() = 0 on a writable temporary directory")
+	}
+	if measured == "" {
+		t.Fatal("availableDiskBytes() did not report the path it measured")
 	}
 }
 
@@ -27,12 +30,17 @@ func TestAvailableDiskBytesWalksUpToAnExistingAncestor(t *testing.T) {
 	// a path that does not exist yet is the normal first-run state.
 	absent := filepath.Join(t.TempDir(), "android", "avd", "not_created_yet.avd")
 
-	got, err := availableDiskBytes(absent)
+	got, measured, err := availableDiskBytes(absent)
 	if err != nil {
 		t.Fatalf("availableDiskBytes(%q) error: %v", absent, err)
 	}
 	if got == 0 {
 		t.Fatal("availableDiskBytes() = 0 for a path whose ancestor exists")
+	}
+	// The report must name the filesystem the number actually describes, not a
+	// path that does not exist.
+	if measured == absent {
+		t.Fatalf("availableDiskBytes() reported %q, which does not exist", measured)
 	}
 }
 
@@ -45,5 +53,11 @@ func TestNearestExistingAncestorFindsTheDeepestExistingDirectory(t *testing.T) {
 	}
 	if got != directory {
 		t.Fatalf("nearestExistingAncestor() = %q, want %q", got, directory)
+	}
+}
+
+func TestAvailableDiskBytesRejectsAnEmptyPath(t *testing.T) {
+	if _, _, err := availableDiskBytes("  "); err == nil {
+		t.Fatal("availableDiskBytes() measured the working directory for a blank path")
 	}
 }

@@ -39,10 +39,10 @@ Use `--device-profile ID` when provisioning something other than the default
 The emulator refuses to create an AVD's userdata partition unless the
 filesystem holding the AVD content directory has **1.2x** the configured
 `disk.dataPartition.size` free. It reports the shortfall as `Not enough space
-to create userdata partition`, but that message goes to the emulator's own
-output: what a CI log usually shows is `could not connect to TCP port 5554:
-Connection refused` or `Timeout waiting for emulator to boot`, both of which
-read like a slow boot and are not one.
+to create userdata partition`, but that goes to the emulator's own output,
+which `emulator.Start` writes to stdout rather than attaching to the error.
+What a go-adbtest log shows instead is `emulator process exited before its
+serial was detected`, which reads like a crash or a slow boot and is neither.
 
 Two figures are worth budgeting for, and they differ by provenance:
 
@@ -50,6 +50,11 @@ Two figures are worth budgeting for, and they differ by provenance:
 | --- | --- | --- |
 | Created by `EnsureAVD` or `avdmanager` | `10G` | **12.0 GiB** |
 | No configured size (the emulator's default) | 6 GiB | **7.2 GiB** |
+| Configured below 6 GiB, e.g. `2G` | raised to 6 GiB | **7.2 GiB** |
+
+Lowering `disk.dataPartition.size` below 6 GiB does not shrink the requirement:
+the emulator raises anything smaller to its own minimum and writes the raised
+value back into `config.ini`.
 
 `adbtest doctor --avd NAME` compares that AVD's own configuration against the
 free space where its files live. Without `--avd` it reports free space against
@@ -61,9 +66,11 @@ AVD that has already booted keeps working below the threshold and doctor
 reports it as a warning rather than a failure. This is why the problem tends to
 appear on ephemeral CI runners and never on a workstation.
 
-On macOS, the measurement excludes purgeable space and local snapshots, so it
-can read well below what Finder shows. The emulator measures the same way, so
-doctor's verdict still matches the emulator's.
+On macOS the figure is `statfs`'s unprivileged-available space, which is what
+`df` reports rather than what Finder shows, since Finder adds purgeable space
+and Time Machine local snapshots. Expect doctor's number to be the lower one.
+The emulator's own check was measured on Linux, so treat a macOS verdict as
+indicative rather than exact.
 
 ## Quick start
 
@@ -722,7 +729,8 @@ it once under a stable name—manually or through a separately bounded
 `EnsureAVD` bootstrap step—then check prerequisite health and exact-name
 presence with `adbtest doctor --avd NAME` and pass that name to `HeadlessAVD`.
 Doctor reads that AVD's `config.ini` to size its userdata partition, but does
-not validate its image or lightweight profile; `EnsureAVD` does that. Keep the large system-image download out of the normal test hot path
+not validate its image or lightweight profile; `EnsureAVD` does that. Keep the
+large system-image download out of the normal test hot path
 when possible. Do not manually start that same AVD first. In either CI mode,
 keep `go test -p=1` so multiple package-level `TestMain` functions do not
 launch emulators concurrently.

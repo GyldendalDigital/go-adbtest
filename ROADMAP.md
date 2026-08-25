@@ -120,7 +120,7 @@ used deterministic no-emulator validation. Detailed status lives in
   the emulator's measured 1.2x multiplier rather than an invented threshold
 - [x] Creation-only semantics: an AVD that already has a userdata partition is
   a warning, never a failure
-- [x] Failure reachable only with `--avd`, so no existing invocation newly fails
+- [x] Failure reachable only with `--avd`, so no invocation without it newly fails
 - [x] AVD metadata resolution moved to `internal/androidsdk` behind one entry
   point, with the previously untested resolution paths characterized first
 - [x] Cross-compilation of the build-tagged hosts added to CI

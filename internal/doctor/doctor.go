@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"reflect"
 	"runtime"
 	"strconv"
 	"strings"
@@ -71,9 +72,10 @@ type dependencies struct {
 	avdHomes       func() ([]string, error)
 	run            func(context.Context, string, []string, io.Reader, io.Writer) (androidsdk.CommandResult, error)
 	// availableDiskBytes measures unprivileged-available space on the
-	// filesystem holding a path. Injected so the disk check stays hermetic:
-	// nothing in this package touches the host filesystem directly.
-	availableDiskBytes func(string) (uint64, error)
+	// filesystem holding a path, and reports the path it actually measured.
+	// Injected so that nothing on the check path reaches the filesystem except
+	// through this seam.
+	availableDiskBytes func(string) (uint64, string, error)
 	// avdDisk reads an AVD's config.ini and reports whether its userdata
 	// partition already exists.
 	avdDisk        func(string, []string) (avdDiskInfo, bool, error)
@@ -162,12 +164,21 @@ func normalizeOptions(options Options) (Options, error) {
 	return options, nil
 }
 
+// Func fields are checked by reflection rather than by name so that a newly
+// added dependency cannot be wired into production but omitted here, or the
+// reverse. Either mistake fails every real run while a hand-maintained list
+// keeps the test suite green.
+//
 //nolint:gocritic // Validation deliberately receives the complete immutable seam.
 func validateDependencies(deps dependencies) error {
-	if strings.TrimSpace(deps.goos) == "" || strings.TrimSpace(deps.goarch) == "" ||
-		deps.getenv == nil || deps.lookPath == nil || deps.resolveSDKRoot == nil ||
-		deps.findTool == nil || deps.avdHomes == nil || deps.run == nil ||
-		deps.availableDiskBytes == nil || deps.avdDisk == nil {
+	value := reflect.ValueOf(deps)
+	for index := 0; index < value.NumField(); index++ {
+		field := value.Type().Field(index)
+		if field.Type.Kind() == reflect.Func && value.Field(index).IsNil() {
+			return fmt.Errorf("doctor: internal dependencies are incomplete: %s is not set", field.Name)
+		}
+	}
+	if strings.TrimSpace(deps.goos) == "" || strings.TrimSpace(deps.goarch) == "" {
 		return errors.New("doctor: internal dependencies are incomplete")
 	}
 	if deps.commandTimeout <= 0 {

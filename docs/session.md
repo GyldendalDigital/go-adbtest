@@ -193,6 +193,7 @@ socket/forward ownership, current emulator GPU defaults, and all lint findings.
 | 2026-08-03 | Committed the read-only doctor | Commit `9f85bbf` adds the CLI and fake-driven checks; its Android command allowlist is version, list, and acceleration diagnostics only |
 | 2026-08-03 | Completed final M10 validation | Full race tests with coverage, vet, lint with and without the integration tag, native and Windows builds, tagged example, module tidy/verify, formatting, YAML parsing, diff checks, and govulncheck pass; final council and API audits have no unresolved blockers |
 | 2026-08-25 | Added the disk-capacity preflight | Characterized the untested AVD metadata resolution paths, moved them to `internal/androidsdk` behind `AVDConfig`, and added `checkDiskSpace`; the emulator's 1.2x userdata requirement and its creation-only semantics were measured against emulator 36.6.11.0 rather than inferred, and CI now cross-compiles the build-tagged hosts |
+| 2026-08-25 | Closed the code-council findings | The 1.2x multiplier, the 6 GiB floor and its exact 6143M/6144M/6145M boundary, the creation-only gate, and the size grammar were all confirmed against emulator 36.6.11.0 by disassembling its space check; the grammar was corrected to mirror the emulator's strictness after `7GiB` and `+7G` were found to be honoured by the emulator but rejected here, which under-reported the requirement |
 
 ## Next Action
 
