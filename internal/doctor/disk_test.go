@@ -343,18 +343,18 @@ func TestRequiredBytesCannotOverflow(t *testing.T) {
 
 func TestDataPartitionBytesRaisesUnsetAndUndersizedValues(t *testing.T) {
 	tests := []struct {
-		name           string
-		raw            string
-		wantSize       uint64
-		wantConfigured bool
+		name       string
+		raw        string
+		wantSize   uint64
+		wantOrigin sizeOrigin
 	}{
-		{"absent", "", emulatorDataPartitionFloor, false},
-		{"zero", "0", emulatorDataPartitionFloor, false},
-		{"unparseable", "banana", emulatorDataPartitionFloor, false},
-		{"below the floor", "900000", emulatorDataPartitionFloor, false},
-		{"at the floor", "6442450944", 6 << 30, true},
-		{"avdmanager default", "10G", 10 << 30, true},
-		{"absurd", "99999999G", maxDataPartitionSize, true},
+		{"absent", "", emulatorDataPartitionFloor, sizeDefaulted},
+		{"zero", "0", emulatorDataPartitionFloor, sizeDefaulted},
+		{"unparseable", "banana", emulatorDataPartitionFloor, sizeDefaulted},
+		{"below the floor", "900000", emulatorDataPartitionFloor, sizeRaised},
+		{"at the floor", "6442450944", 6 << 30, sizeConfigured},
+		{"avdmanager default", "10G", 10 << 30, sizeConfigured},
+		{"absurd", "99999999G", maxDataPartitionSize, sizeConfigured},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -362,10 +362,10 @@ func TestDataPartitionBytesRaisesUnsetAndUndersizedValues(t *testing.T) {
 			if test.raw != "" {
 				values["disk.dataPartition.size"] = test.raw
 			}
-			size, configured := dataPartitionBytes(values)
-			if size != test.wantSize || configured != test.wantConfigured {
+			size, origin := dataPartitionBytes(values)
+			if size != test.wantSize || origin != test.wantOrigin {
 				t.Fatalf("dataPartitionBytes(%q) = %d, %v, want %d, %v",
-					test.raw, size, configured, test.wantSize, test.wantConfigured)
+					test.raw, size, origin, test.wantSize, test.wantOrigin)
 			}
 		})
 	}
@@ -484,5 +484,14 @@ func TestProductionAVDDiskReportsAnAbsentAVD(t *testing.T) {
 	disk, found, err := productionAVDDisk("go_test", []string{t.TempDir()})
 	if err != nil || found || disk.Created {
 		t.Fatalf("productionAVDDisk() = %+v, %v, %v", disk, found, err)
+	}
+}
+
+func TestCheckDiskSpaceDistinguishesARaisedSizeFromAnUnsetOne(t *testing.T) {
+	deps, _ := diskDependencies("expected_avd", coldAVD("900000"), incidentAvailable)
+
+	result := findResult(t, runDiskCheck(t, Options{AVD: "expected_avd"}, deps), "disk space")
+	if !strings.Contains(result.Detail, "raises that AVD's smaller configured size") {
+		t.Fatalf("detail %q claims the AVD sets no size when it sets a small one", result.Detail)
 	}
 }

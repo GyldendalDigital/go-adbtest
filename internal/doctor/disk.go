@@ -56,22 +56,35 @@ func requiredBytes(dataPartition uint64) uint64 {
 	return dataPartition * 6 / 5
 }
 
+// sizeOrigin records where a userdata partition size came from, so the report
+// can state an assumption it made rather than presenting it as the AVD's own
+// configuration.
+type sizeOrigin int
+
+const (
+	// sizeConfigured means config.ini set a usable size.
+	sizeConfigured sizeOrigin = iota
+	// sizeDefaulted means config.ini set no usable size, so the emulator picks.
+	sizeDefaulted
+	// sizeRaised means config.ini set a size below the emulator's minimum,
+	// which the emulator silently raises.
+	sizeRaised
+)
+
 // dataPartitionBytes reports the userdata partition size an AVD will be created
-// with, and whether config.ini actually specified it. An absent, empty,
-// unparseable or zero value means the emulator picks its own size, and the
-// emulator raises anything below that size to it.
-func dataPartitionBytes(values map[string]string) (size uint64, configured bool) {
+// with, and where that number came from.
+func dataPartitionBytes(values map[string]string) (size uint64, origin sizeOrigin) {
 	parsed, ok := parseEmulatorSize(values["disk.dataPartition.size"])
 	if !ok || parsed == 0 {
-		return emulatorDataPartitionFloor, false
+		return emulatorDataPartitionFloor, sizeDefaulted
 	}
 	if parsed < emulatorDataPartitionFloor {
-		return emulatorDataPartitionFloor, false
+		return emulatorDataPartitionFloor, sizeRaised
 	}
 	if parsed > maxDataPartitionSize {
-		return maxDataPartitionSize, true
+		return maxDataPartitionSize, sizeConfigured
 	}
-	return parsed, true
+	return parsed, sizeConfigured
 }
 
 // headroomBytes reports the space an AVD needs beyond its userdata partition.
@@ -230,7 +243,7 @@ func (c *checker) checkDiskSpace() {
 		c.addMeasurementFailure(disk.Directory, err)
 		return
 	}
-	dataSize, configured := dataPartitionBytes(disk.Values)
+	dataSize, origin := dataPartitionBytes(disk.Values)
 	required := requiredBytes(dataSize)
 	comfortable := addWithoutOverflow(required, headroomBytes(disk.Values))
 
@@ -240,7 +253,7 @@ func (c *checker) checkDiskSpace() {
 			Severity: OK,
 			Name:     "disk space",
 			Detail: fmt.Sprintf("AVD %q needs %s for its userdata partition%s; %s has %s free",
-				c.options.AVD, formatGiB(required), assumedDefault(configured), disk.Directory, formatGiB(available)),
+				c.options.AVD, formatGiB(required), describeOrigin(origin), disk.Directory, formatGiB(available)),
 		})
 	case disk.Created:
 		c.add(Result{
@@ -255,7 +268,7 @@ func (c *checker) checkDiskSpace() {
 			Severity: Failure,
 			Name:     "disk space",
 			Detail: fmt.Sprintf("AVD %q needs %s to create its userdata partition%s but %s has %s free",
-				c.options.AVD, formatMiB(required), assumedDefault(configured), disk.Directory, formatMiB(available)),
+				c.options.AVD, formatMiB(required), describeOrigin(origin), disk.Directory, formatMiB(available)),
 			Hint: fmt.Sprintf("free at least %s on that filesystem, point ANDROID_AVD_HOME at a larger volume, or lower disk.dataPartition.size in that AVD's config.ini, then rerun %s",
 				formatMiB(required-available), doctorCommand(c.options.AVD)),
 		})
@@ -263,8 +276,8 @@ func (c *checker) checkDiskSpace() {
 		c.add(Result{
 			Severity: Warning,
 			Name:     "disk space",
-			Detail: fmt.Sprintf("AVD %q needs %s and %s has %s free, leaving %s spare",
-				c.options.AVD, formatMiB(required), disk.Directory, formatMiB(available), formatMiB(available-required)),
+			Detail: fmt.Sprintf("AVD %q needs %s%s and %s has %s free, leaving %s spare",
+				c.options.AVD, formatMiB(required), describeOrigin(origin), disk.Directory, formatMiB(available), formatMiB(available-required)),
 			Hint: fmt.Sprintf("free another %s so the AVD keeps room for its cache and SD card images, or point ANDROID_AVD_HOME at a larger volume",
 				formatMiB(comfortable-available)),
 		})
@@ -340,11 +353,16 @@ func (c *checker) addMeasurementFailure(path string, err error) {
 	})
 }
 
-func assumedDefault(configured bool) string {
-	if configured {
+func describeOrigin(origin sizeOrigin) string {
+	switch origin {
+	case sizeDefaulted:
+		return fmt.Sprintf(" (assuming the emulator's %s default, which that AVD does not set)", formatGiB(emulatorDataPartitionFloor))
+	case sizeRaised:
+		return fmt.Sprintf(" (the emulator raises that AVD's smaller configured size to its %s minimum)", formatGiB(emulatorDataPartitionFloor))
+	case sizeConfigured:
 		return ""
 	}
-	return fmt.Sprintf(" (assuming the emulator's %s default, which that AVD does not set)", formatGiB(emulatorDataPartitionFloor))
+	return ""
 }
 
 func doctorCommand(avd string) string {
