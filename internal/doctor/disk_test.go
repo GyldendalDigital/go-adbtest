@@ -204,7 +204,9 @@ func TestCheckDiskSpaceStatesWhereTheRequirementCameFrom(t *testing.T) {
 // above the emulator's minimum. Suggesting it anywhere else sends a consumer -
 // especially an automated one - round a loop that can never terminate.
 func TestCheckDiskSpaceOffersOnlyRemediesThatCanWork(t *testing.T) {
-	futile := []string{"", "2G", "banana"}
+	// incidentDataPartition is exactly 6 GiB: configured, but with nothing left
+	// to lower it to.
+	futile := []string{"", "2G", "banana", incidentDataPartition, "4000000000G"}
 	for _, size := range futile {
 		t.Run("futile/"+size, func(t *testing.T) {
 			result := diskResult(t, Options{AVD: "expected_avd"}, coldAVD(size), 1<<20)
@@ -228,31 +230,77 @@ func TestCheckDiskSpaceOffersOnlyRemediesThatCanWork(t *testing.T) {
 	if !strings.Contains(result.Hint, "6G") {
 		t.Fatalf("hint %q does not name a value that can be typed into config.ini", result.Hint)
 	}
+
+	// An implausibly large size is the other origin where lowering genuinely helps.
+	capped := diskResult(t, Options{AVD: "expected_avd"}, coldAVD("4000000000G"), 8<<30)
+	if !strings.Contains(capped.Hint, "lower disk.dataPartition.size") {
+		t.Fatalf("hint %q omits the remedy for an implausibly large size", capped.Hint)
+	}
 }
 
 // Below API 24 the emulator's 6 GiB minimum is feature-flagged, so a
 // requirement derived from raising a smaller size is not certain enough to fail
 // a host that may well boot.
-func TestCheckDiskSpaceWillNotFailOnAnUncertainRaise(t *testing.T) {
-	values := map[string]string{"disk.dataPartition.size": "2G", "target": "android-23"}
-	disk := avdDiskInfo{Values: values, Directory: avdDirectory}
-
-	deps, _ := diskDependencies("expected_avd", disk, incidentAvailable)
-	report := runDiskCheck(t, Options{AVD: "expected_avd"}, deps)
-
-	result := findResult(t, report, "disk space")
-	if result.Severity != Warning {
-		t.Fatalf("disk space result = %+v, want Warning where the raise is uncertain", result)
+func TestCheckDiskSpaceWillNotFailOnAnUncertainRequirement(t *testing.T) {
+	tests := []struct {
+		name   string
+		size   string
+		target string
+		want   Severity
+	}{
+		{"raised below the flag", "2G", "android-23", Warning},
+		{"raised at the flag", "2G", "android-24", Failure},
+		{"raised on a modern image", "2G", "android-35", Failure},
+		{"unset below the flag", "", "android-23", Warning},
+		{"unset on a modern image", "", "android-35", Failure},
+		{"configured below the flag", "20G", "android-23", Failure},
+		{"unparseable target", "2G", "android-banana", Failure},
+		{"no target at all", "2G", "", Failure},
 	}
-	if report.ExitCode() != 0 {
-		t.Fatalf("ExitCode() = %d, want 0", report.ExitCode())
-	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			values := map[string]string{}
+			if test.size != "" {
+				values["disk.dataPartition.size"] = test.size
+			}
+			if test.target != "" {
+				values["target"] = test.target
+			}
+			disk := avdDiskInfo{Values: values, Directory: avdDirectory}
+			deps, _ := diskDependencies("expected_avd", disk, incidentAvailable)
+			report := runDiskCheck(t, Options{AVD: "expected_avd"}, deps)
 
-	// The same AVD on a modern image is a certain shortfall.
-	values["target"] = "android-35"
-	deps, _ = diskDependencies("expected_avd", disk, incidentAvailable)
-	if result = findResult(t, runDiskCheck(t, Options{AVD: "expected_avd"}, deps), "disk space"); result.Severity != Failure {
-		t.Fatalf("disk space result = %+v, want Failure from API 24 up", result)
+			result := findResult(t, report, "disk space")
+			if result.Severity != test.want {
+				t.Fatalf("disk space result = %+v, want %v", result, test.want)
+			}
+			if test.want == Warning && report.ExitCode() != 0 {
+				t.Fatalf("ExitCode() = %d, want 0 where the requirement is uncertain", report.ExitCode())
+			}
+		})
+	}
+}
+
+// M3: without a named AVD the floor is the only threshold, so pin both sides.
+func TestCheckDiskSpaceWithoutAnAVDPinsTheFloorBoundary(t *testing.T) {
+	floor := requiredBytes(emulatorDataPartitionFloor)
+	tests := []struct {
+		name      string
+		available uint64
+		want      Severity
+	}{
+		{"one byte below the floor", floor - 1, Warning},
+		{"exactly the floor", floor, Information},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			deps, _ := healthyDependencies()
+			deps.availableDiskBytes = func(path string) (uint64, string, error) { return test.available, path, nil }
+			result := findResult(t, runDiskCheck(t, Options{}, deps), "disk space")
+			if result.Severity != test.want {
+				t.Fatalf("severity at %d = %v, want %v", test.available, result.Severity, test.want)
+			}
+		})
 	}
 }
 
@@ -525,6 +573,17 @@ func TestValidateDependenciesRejectsMissingDiskSeams(t *testing.T) {
 	if err := validateDependencies(withoutAVD); err == nil {
 		t.Fatal("validateDependencies() accepted a nil avdDisk")
 	}
+	// Reflection covers only func fields; these still need their own condition.
+	withoutHost := deps
+	withoutHost.goos = ""
+	if err := validateDependencies(withoutHost); err == nil {
+		t.Fatal("validateDependencies() accepted a blank goos")
+	}
+	withoutTimeout := deps
+	withoutTimeout.commandTimeout = 0
+	if err := validateDependencies(withoutTimeout); err == nil {
+		t.Fatal("validateDependencies() accepted a zero command timeout")
+	}
 }
 
 func TestRequiredBytesReproducesTheEmulatorArithmetic(t *testing.T) {
@@ -703,6 +762,17 @@ func TestProductionAVDDiskDetectsAnExistingUserdataPartition(t *testing.T) {
 	}
 	if disk, _, err = productionAVDDisk("go_test", []string{home}); err != nil || disk.Created {
 		t.Fatalf("productionAVDDisk() = %+v, %v, want the overlay alone treated as uncreated", disk, err)
+	}
+
+	// A directory of that name is not a partition image.
+	if err := os.MkdirAll(filepath.Join(directory, "userdata-qemu.img"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if disk, _, err = productionAVDDisk("go_test", []string{home}); err != nil || disk.Created {
+		t.Fatalf("productionAVDDisk() = %+v, %v, want a directory rejected as a partition", disk, err)
+	}
+	if err := os.Remove(filepath.Join(directory, "userdata-qemu.img")); err != nil {
+		t.Fatal(err)
 	}
 
 	if err := os.WriteFile(filepath.Join(directory, "userdata-qemu.img"), []byte("image"), 0o644); err != nil {

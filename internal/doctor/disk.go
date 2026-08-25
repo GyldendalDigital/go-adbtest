@@ -276,7 +276,7 @@ func (c *checker) checkDiskSpace() {
 	// feature flag, so a smaller configured partition may be honoured and this
 	// requirement may be an overestimate.
 	shortfall := Failure
-	if origin == sizeRaised && raisedSizeIsUncertain(disk.Values) {
+	if (origin == sizeRaised || origin == sizeDefaulted) && derivedSizeIsUncertain(disk.Values) {
 		shortfall = Warning
 	}
 
@@ -457,10 +457,11 @@ func describeOrigin(origin sizeOrigin, format func(uint64) string) string {
 	}
 }
 
-// raisedSizeIsUncertain reports whether the AVD targets an API level where the
-// emulator's 6 GiB minimum is feature-flagged rather than unconditional, so a
-// requirement derived from raising a smaller size cannot be relied on.
-func raisedSizeIsUncertain(values map[string]string) bool {
+// derivedSizeIsUncertain reports whether the AVD targets an API level where the
+// emulator's 6 GiB minimum is feature-flagged rather than unconditional. Both a
+// raised size and an absent one come out of that same clamp, so below API 24
+// neither requirement can be relied on.
+func derivedSizeIsUncertain(values map[string]string) bool {
 	target := strings.TrimPrefix(strings.TrimSpace(values["target"]), "android-")
 	level, err := strconv.Atoi(target)
 	return err == nil && level < 24

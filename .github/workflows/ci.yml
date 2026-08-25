@@ -51,13 +51,15 @@ jobs:
       # and a fallback for every other host, and the darwin path differs in a
       # way the Linux build cannot catch: Statfs_t.Bsize is int64 on Linux and
       # uint32 on macOS.
-      # go vet rather than go build: build skips _test.go files, so a
-      # darwin-only breakage in a build-tagged test would still ship silently.
+      # Both: go build links the commands, and go vet type-checks _test.go
+      # files, which go build skips - so a darwin-only breakage in a
+      # build-tagged test would otherwise ship silently.
       - name: Cross-compile the build-tagged hosts
         run: |
-          GOOS=darwin GOARCH=arm64 go vet ./...
-          GOOS=darwin GOARCH=amd64 go vet ./...
-          GOOS=windows GOARCH=amd64 go vet ./...
+          for target in darwin/arm64 darwin/amd64 windows/amd64; do
+            GOOS="${target%/*}" GOARCH="${target#*/}" go build ./...
+            GOOS="${target%/*}" GOARCH="${target#*/}" go vet ./...
+          done
 
       - name: Verify go.mod is tidy
         run: |
