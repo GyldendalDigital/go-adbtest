@@ -644,3 +644,214 @@ func writeAVD(t *testing.T, home, name string, api int, target, arch, device, ne
 		t.Fatal(err)
 	}
 }
+
+// findAVDConfig, readRegularFile, and parseINI had no direct tests before this
+// change; they were covered only transitively through EnsureAVD, which always
+// writes an absolute path= entry. These characterization tests pin the
+// observable behaviour of the paths EnsureAVD never reaches so the helpers can
+// be relocated without silently losing it.
+
+func writeAVDMetadata(t *testing.T, home, name, body string) {
+	t.Helper()
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, name+".ini"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeAVDContent(t *testing.T, directory string) string {
+	t.Helper()
+	if err := os.MkdirAll(directory, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(directory, "config.ini")
+	if err := os.WriteFile(configPath, []byte("AvdId=go_test\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return configPath
+}
+
+func TestFindAVDConfigResolvesPathRelAgainstTheAVDHomeParent(t *testing.T) {
+	base := t.TempDir()
+	home := filepath.Join(base, "avd")
+	want := writeAVDContent(t, filepath.Join(home, "go_test.avd"))
+	writeAVDMetadata(t, home, "go_test", "path.rel=avd/go_test.avd\n")
+
+	got, found, err := findAVDConfig("go_test", []string{home})
+	if err != nil || !found {
+		t.Fatalf("findAVDConfig() = %q, %v, %v", got, found, err)
+	}
+	if got != want {
+		t.Fatalf("findAVDConfig() = %q, want %q", got, want)
+	}
+}
+
+func TestFindAVDConfigJoinsRelativePathAgainstTheAVDHome(t *testing.T) {
+	home := t.TempDir()
+	want := writeAVDContent(t, filepath.Join(home, "go_test.avd"))
+	writeAVDMetadata(t, home, "go_test", "path=go_test.avd\n")
+
+	got, found, err := findAVDConfig("go_test", []string{home})
+	if err != nil || !found {
+		t.Fatalf("findAVDConfig() = %q, %v, %v", got, found, err)
+	}
+	if got != want {
+		t.Fatalf("findAVDConfig() = %q, want %q", got, want)
+	}
+}
+
+func TestFindAVDConfigRejectsMetadataWithoutAPath(t *testing.T) {
+	home := t.TempDir()
+	writeAVDMetadata(t, home, "go_test", "target=android-35\n")
+
+	_, found, err := findAVDConfig("go_test", []string{home})
+	if err == nil || !strings.Contains(err.Error(), "has no path") {
+		t.Fatalf("findAVDConfig() error = %v, want no-path rejection", err)
+	}
+	if found {
+		t.Fatal("findAVDConfig() reported a usable config for metadata without a path")
+	}
+}
+
+func TestFindAVDConfigReportsMetadataPointingAtAMissingConfig(t *testing.T) {
+	home := t.TempDir()
+	directory := filepath.Join(home, "go_test.avd")
+	if err := os.MkdirAll(directory, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeAVDMetadata(t, home, "go_test", "path="+directory+"\n")
+
+	_, found, err := findAVDConfig("go_test", []string{home})
+	if err == nil || !strings.Contains(err.Error(), "points to missing config") {
+		t.Fatalf("findAVDConfig() error = %v, want missing-config rejection", err)
+	}
+	if found {
+		t.Fatal("findAVDConfig() reported a usable config that does not exist")
+	}
+}
+
+func TestFindAVDConfigRejectsNonRegularConfig(t *testing.T) {
+	home := t.TempDir()
+	directory := filepath.Join(home, "go_test.avd")
+	if err := os.MkdirAll(filepath.Join(directory, "config.ini"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeAVDMetadata(t, home, "go_test", "path="+directory+"\n")
+
+	_, found, err := findAVDConfig("go_test", []string{home})
+	if err == nil || !strings.Contains(err.Error(), "is not a regular file") {
+		t.Fatalf("findAVDConfig() error = %v, want non-regular config rejection", err)
+	}
+	if found {
+		t.Fatal("findAVDConfig() reported a directory as a usable config")
+	}
+}
+
+func TestFindAVDConfigRejectsNonRegularMetadata(t *testing.T) {
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, "go_test.ini"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	_, found, err := findAVDConfig("go_test", []string{home})
+	if err == nil || !strings.Contains(err.Error(), "read AVD metadata") {
+		t.Fatalf("findAVDConfig() error = %v, want unreadable metadata rejection", err)
+	}
+	if found {
+		t.Fatal("findAVDConfig() reported a usable config for directory metadata")
+	}
+}
+
+func TestFindAVDConfigReportsUnreadableMetadata(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses file permissions")
+	}
+	home := t.TempDir()
+	writeAVDMetadata(t, home, "go_test", "path=/anywhere\n")
+	metadataPath := filepath.Join(home, "go_test.ini")
+	if err := os.Chmod(metadataPath, 0o000); err != nil {
+		t.Skipf("chmod is unsupported here: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(metadataPath, 0o644) })
+
+	_, found, err := findAVDConfig("go_test", []string{home})
+	if err == nil || !strings.Contains(err.Error(), "read AVD metadata") {
+		t.Fatalf("findAVDConfig() error = %v, want unreadable metadata rejection", err)
+	}
+	if found {
+		t.Fatal("findAVDConfig() reported a usable config it could not read")
+	}
+}
+
+func TestFindAVDConfigSkipsBlankHomesAndSearchesEveryHome(t *testing.T) {
+	first, second := t.TempDir(), t.TempDir()
+	directory := filepath.Join(second, "go_test.avd")
+	want := writeAVDContent(t, directory)
+	writeAVDMetadata(t, second, "go_test", "path="+directory+"\n")
+
+	got, found, err := findAVDConfig("go_test", []string{"", "   ", first, second})
+	if err != nil || !found {
+		t.Fatalf("findAVDConfig() = %q, %v, %v", got, found, err)
+	}
+	if got != want {
+		t.Fatalf("findAVDConfig() = %q, want %q", got, want)
+	}
+}
+
+func TestFindAVDConfigResolvesThroughASymlinkedAVDHome(t *testing.T) {
+	base := t.TempDir()
+	real := filepath.Join(base, "real")
+	directory := filepath.Join(real, "go_test.avd")
+	want := writeAVDContent(t, directory)
+	writeAVDMetadata(t, real, "go_test", "path="+directory+"\n")
+	link := filepath.Join(base, "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlinks are unsupported here: %v", err)
+	}
+
+	got, found, err := findAVDConfig("go_test", []string{link})
+	if err != nil || !found {
+		t.Fatalf("findAVDConfig() = %q, %v, %v", got, found, err)
+	}
+	if got != want {
+		t.Fatalf("findAVDConfig() = %q, want %q", got, want)
+	}
+}
+
+func TestFindAVDConfigReportsAnAbsentAVDWithoutError(t *testing.T) {
+	got, found, err := findAVDConfig("go_test", []string{t.TempDir()})
+	if err != nil {
+		t.Fatalf("findAVDConfig() error: %v", err)
+	}
+	if found || got != "" {
+		t.Fatalf("findAVDConfig() = %q, %v, want an absent AVD reported as not found", got, found)
+	}
+}
+
+func TestParseINIHandlesCommentsWhitespaceAndMalformedLines(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  map[string]string
+	}{
+		{"comments and padding", "# hash\n; semicolon\n\n  key = value  \n", map[string]string{"key": "value"}},
+		{"line without a separator", "novalue\nkey=value\n", map[string]string{"key": "value"}},
+		{"duplicate key keeps the last", "key=first\nkey=second\n", map[string]string{"key": "second"}},
+		{"empty value", "key=\n", map[string]string{"key": ""}},
+		{"empty key", "=value\n", map[string]string{"": "value"}},
+		{"carriage returns", "a=1\r\nb=2\r\n", map[string]string{"a": "1", "b": "2"}},
+		{"separator inside the value", "key=a=b\n", map[string]string{"key": "a=b"}},
+		{"invalid utf-8 is preserved", "key=\xff\xfe\n", map[string]string{"key": "\xff\xfe"}},
+		{"nul byte is preserved", "key=a\x00b\n", map[string]string{"key": "a\x00b"}},
+		{"no trailing newline", "key=value", map[string]string{"key": "value"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := parseINI([]byte(test.input)); !reflect.DeepEqual(got, test.want) {
+				t.Fatalf("parseINI() = %#v, want %#v", got, test.want)
+			}
+		})
+	}
+}
