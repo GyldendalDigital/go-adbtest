@@ -649,9 +649,9 @@ func writeAVD(t *testing.T, home, name string, api int, target, arch, device, ne
 // parsed metadata rather than a hand-built map.
 func loadAVDValues(t *testing.T, name, home string) map[string]string {
 	t.Helper()
-	values, _, found, err := androidsdk.AVDConfig(name, []string{home})
+	metadata, found, err := androidsdk.AVDConfig(name, []string{home})
 	if err != nil || !found {
 		t.Fatalf("AVDConfig(%q) = %v, %v", name, found, err)
 	}
-	return values
+	return metadata.Values
 }

@@ -13,20 +13,29 @@ import (
 // an arbitrarily large file reached through an AVD's path entry.
 const maxAVDMetadataSize = 1 << 20
 
-// AVDConfig locates the named AVD in the given AVD homes and returns its
-// parsed config.ini together with the AVD content directory holding it. It
-// reports found false with a nil error when no home holds metadata for the
-// name, and returns an error when metadata exists but is unusable.
-func AVDConfig(name string, homes []string) (values map[string]string, directory string, found bool, err error) {
+// AVDMetadata describes an AVD located in one of the AVD homes.
+type AVDMetadata struct {
+	// Values is the parsed config.ini, nil when it could not be read.
+	Values map[string]string
+	// Directory is the AVD content directory holding the AVD's files. It is set
+	// even when Values is not, so a caller can still inspect that location.
+	Directory string
+}
+
+// AVDConfig locates the named AVD in the given AVD homes and returns its parsed
+// config.ini together with the content directory holding it. It reports found
+// false with a nil error when no home holds metadata for the name, and returns
+// an error when metadata exists but is unusable.
+func AVDConfig(name string, homes []string) (AVDMetadata, bool, error) {
 	directory, configPath, found, err := findAVD(name, homes)
 	if err != nil || !found {
-		return nil, directory, found, err
+		return AVDMetadata{Directory: directory}, found, err
 	}
 	data, err := readRegularFile(configPath)
 	if err != nil {
-		return nil, directory, true, fmt.Errorf("read AVD config %q: %w", configPath, err)
+		return AVDMetadata{Directory: directory}, true, fmt.Errorf("read AVD config %q: %w", configPath, err)
 	}
-	return parseINI(data), directory, true, nil
+	return AVDMetadata{Values: parseINI(data), Directory: directory}, true, nil
 }
 
 // findAVD resolves the AVD content directory and config.ini path for name by

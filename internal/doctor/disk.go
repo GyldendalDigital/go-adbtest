@@ -49,7 +49,8 @@ const (
 	// this check warns. It is deliberately small and flat.
 	//
 	// Nothing else in the AVD directory is preallocated: userdata-qemu.img is a
-	// ~10 MiB sparse stub, cache.img holds 5.2 MiB of a 66 MiB apparent file,
+	// ~10 MiB stub rather than a preallocated full-size image, cache.img holds
+	// 5.2 MiB of a 66 MiB apparent file,
 	// and avdmanager AVDs never get an sdcard.img at all. What does grow is the
 	// qcow2 overlay - 1.87 GB inside a minute of first boot - and the
 	// emulator's own 1.2x is precisely the allowance for that, so a second
@@ -113,36 +114,46 @@ func dataPartitionBytes(values map[string]string) (size uint64, origin sizeOrigi
 }
 
 // parseEmulatorSize parses the grammar the emulator accepts for a partition
-// size. It deliberately mirrors the emulator's strictness rather than being
-// lenient: a value this rejects is one the emulator also rejects, so both fall
-// back to the same size. Being more permissive would under-report the
-// requirement, which is the one direction that produces a false pass.
+// size, reproducing its shape exactly:
 //
-// A bare integer is a count of BYTES, not megabytes - the emulator's
-// -partition-size flag uses megabytes, which makes this easy to get backwards.
-// A K, M or G suffix is a binary multiple and may be followed by B or iB. Case
-// is insignificant and a leading + is allowed. Embedded spaces, a trailing B on
-// a bare integer, T, decimals and hex are all rejected. Each of these was
-// measured against emulator 36.6.11.0.
+//	[whitespace] ['+'] digits [ k|K|m|M|g|G <anything> ]
+//
+// The unit letter must follow the digits immediately, and everything after that
+// single letter is ignored - the emulator reads 7Gi, 7Gxyz and 7168MiB as sizes,
+// and 7168Mg as 7168 MiB. A bare integer is a count of BYTES, not megabytes;
+// the emulator's -partition-size flag uses megabytes, which makes this easy to
+// get backwards.
+//
+// Diverging in either direction under-reports the requirement. Parsing a value
+// the emulator rejects makes doctor compare against a size the emulator would
+// have replaced with its larger default; rejecting one the emulator accepts
+// makes doctor fall back to that default when the real partition is bigger.
+// The grammar must mirror the emulator, not merely err strict. Measured against
+// emulator 36.6.11.0.
 func parseEmulatorSize(raw string) (uint64, bool) {
 	value := strings.TrimSpace(raw)
 	value = strings.TrimPrefix(value, "+")
+	end := 0
+	for end < len(value) && value[end] >= '0' && value[end] <= '9' {
+		end++
+	}
+	if end == 0 {
+		return 0, false
+	}
 	multiplier := uint64(1)
-	for _, unit := range []struct {
-		suffix string
-		scale  uint64
-	}{
-		{"kib", 1 << 10}, {"kb", 1 << 10}, {"k", 1 << 10},
-		{"mib", 1 << 20}, {"mb", 1 << 20}, {"m", 1 << 20},
-		{"gib", 1 << 30}, {"gb", 1 << 30}, {"g", 1 << 30},
-	} {
-		if len(value) > len(unit.suffix) && strings.EqualFold(value[len(value)-len(unit.suffix):], unit.suffix) {
-			multiplier = unit.scale
-			value = value[:len(value)-len(unit.suffix)]
-			break
+	if end < len(value) {
+		switch value[end] {
+		case 'k', 'K':
+			multiplier = 1 << 10
+		case 'm', 'M':
+			multiplier = 1 << 20
+		case 'g', 'G':
+			multiplier = 1 << 30
+		default:
+			return 0, false
 		}
 	}
-	digits, err := strconv.ParseUint(value, 10, 64)
+	digits, err := strconv.ParseUint(value[:end], 10, 64)
 	if err != nil {
 		return 0, false
 	}
@@ -150,6 +161,21 @@ func parseEmulatorSize(raw string) (uint64, bool) {
 		return 0, false
 	}
 	return digits * multiplier, true
+}
+
+// availableFromStatfs converts a statfs result into a byte count. It lives here
+// rather than beside the syscall so it can be tested on every host: a
+// filesystem reporting a non-positive block size is unmeasurable, and must not
+// be reported as zero free space, which would be a false failure on a working
+// host.
+func availableFromStatfs(blocksAvailable uint64, blockSize int64) (uint64, error) {
+	if blockSize <= 0 {
+		return 0, errors.New("filesystem reported a non-positive block size")
+	}
+	if blocksAvailable > math.MaxUint64/uint64(blockSize) {
+		return math.MaxUint64, nil
+	}
+	return blocksAvailable * uint64(blockSize), nil
 }
 
 // addWithoutOverflow reports left+right, saturating rather than wrapping so a
@@ -188,16 +214,16 @@ type avdDiskInfo struct {
 // productionAVDDisk reads an AVD's configuration and reports whether its
 // userdata partition has already been created.
 func productionAVDDisk(name string, homes []string) (avdDiskInfo, bool, error) {
-	values, directory, found, err := androidsdk.AVDConfig(name, homes)
+	metadata, found, err := androidsdk.AVDConfig(name, homes)
 	if err != nil || !found {
-		return avdDiskInfo{Directory: directory}, found, err
+		return avdDiskInfo{Directory: metadata.Directory}, found, err
 	}
 	// The raw image, not the qcow2 overlay: an AVD can carry the overlay alone,
 	// and the emulator still runs its check in that state.
-	info, statErr := os.Stat(filepath.Join(directory, "userdata-qemu.img"))
+	info, statErr := os.Stat(filepath.Join(metadata.Directory, "userdata-qemu.img"))
 	return avdDiskInfo{
-		Values:    values,
-		Directory: directory,
+		Values:    metadata.Values,
+		Directory: metadata.Directory,
 		Created:   statErr == nil && info.Mode().IsRegular(),
 	}, true, nil
 }
@@ -205,9 +231,9 @@ func productionAVDDisk(name string, homes []string) (avdDiskInfo, bool, error) {
 // checkDiskSpace reports whether the filesystem holding the AVD content
 // directory can satisfy the emulator's userdata partition check. That check
 // runs only when the emulator creates the partition, so an AVD that has already
-// booted is reported as a warning at most: the emulator will not recheck, and
-// failing a host that demonstrably boots would be worse than the bug this
-// catches.
+// booted is reported as a warning at most: the emulator skips the check unless
+// something recreates the partition, and failing a host that demonstrably boots
+// would be worse than the bug this catches.
 func (c *checker) checkDiskSpace() {
 	if len(c.avdHomes) == 0 {
 		c.add(Result{
@@ -292,9 +318,9 @@ func (c *checker) checkDiskSpace() {
 func (c *checker) shortfallHint(deficit uint64, measured string, dataSize uint64, origin sizeOrigin) string {
 	hint := fmt.Sprintf("free at least %s on the volume holding %s, or point ANDROID_AVD_HOME at a larger volume",
 		formatMiB(deficit), measured)
-	if origin == sizeConfigured && dataSize > emulatorDataPartitionFloor {
-		hint += fmt.Sprintf(", or lower disk.dataPartition.size in that AVD's config.ini to no less than the emulator's %s minimum",
-			formatGiB(emulatorDataPartitionFloor))
+	if (origin == sizeConfigured || origin == sizeCapped) && dataSize > emulatorDataPartitionFloor {
+		// 6G rather than a rendered size: this is a value to type into config.ini.
+		hint += ", or lower disk.dataPartition.size in that AVD's config.ini to no less than 6G, the emulator's minimum"
 	}
 	return hint + ", then rerun " + doctorCommand(c.options.AVD)
 }

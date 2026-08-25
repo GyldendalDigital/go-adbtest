@@ -40,25 +40,25 @@ func TestAVDConfigReturnsParsedValuesAndTheContentDirectory(t *testing.T) {
 	writeAVDContent(t, directory, "AvdId=go_test\ndisk.dataPartition.size = 6442450944\n")
 	writeAVDMetadata(t, home, "go_test", "path="+directory+"\n")
 
-	values, gotDirectory, found, err := AVDConfig("go_test", []string{home})
+	metadata, found, err := AVDConfig("go_test", []string{home})
 	if err != nil || !found {
-		t.Fatalf("AVDConfig() = %v, %q, %v, %v", values, gotDirectory, found, err)
+		t.Fatalf("AVDConfig() = %+v, %v, %v", metadata, found, err)
 	}
-	if gotDirectory != directory {
-		t.Fatalf("AVDConfig() directory = %q, want %q", gotDirectory, directory)
+	if metadata.Directory != directory {
+		t.Fatalf("AVDConfig() directory = %q, want %q", metadata.Directory, directory)
 	}
-	if values["disk.dataPartition.size"] != "6442450944" || values["AvdId"] != "go_test" {
-		t.Fatalf("AVDConfig() values = %#v", values)
+	if metadata.Values["disk.dataPartition.size"] != "6442450944" || metadata.Values["AvdId"] != "go_test" {
+		t.Fatalf("AVDConfig() values = %#v", metadata.Values)
 	}
 }
 
 func TestAVDConfigReportsAnAbsentAVDWithoutError(t *testing.T) {
-	values, directory, found, err := AVDConfig("go_test", []string{t.TempDir()})
+	metadata, found, err := AVDConfig("go_test", []string{t.TempDir()})
 	if err != nil {
 		t.Fatalf("AVDConfig() error: %v", err)
 	}
-	if found || values != nil || directory != "" {
-		t.Fatalf("AVDConfig() = %#v, %q, %v, want an absent AVD reported as not found", values, directory, found)
+	if found || metadata.Values != nil || metadata.Directory != "" {
+		t.Fatalf("AVDConfig() = %+v, %v, want an absent AVD reported as not found", metadata, found)
 	}
 }
 
@@ -275,14 +275,14 @@ func TestAVDConfigReportsAnUnreadableConfigButStillNamesTheDirectory(t *testing.
 	}
 	t.Cleanup(func() { _ = os.Chmod(configPath, 0o644) })
 
-	values, gotDirectory, found, err := AVDConfig("go_test", []string{home})
+	metadata, found, err := AVDConfig("go_test", []string{home})
 	if err == nil || !strings.Contains(err.Error(), "read AVD config") {
 		t.Fatalf("AVDConfig() error = %v, want an unreadable-config rejection", err)
 	}
-	if !found || values != nil {
-		t.Fatalf("AVDConfig() = %#v, %v, want the AVD reported as present but unparsed", values, found)
+	if !found || metadata.Values != nil {
+		t.Fatalf("AVDConfig() = %+v, %v, want the AVD reported as present but unparsed", metadata, found)
 	}
-	if gotDirectory != directory {
-		t.Fatalf("AVDConfig() directory = %q, want %q so callers can still measure it", gotDirectory, directory)
+	if metadata.Directory != directory {
+		t.Fatalf("AVDConfig() directory = %q, want %q so callers can still measure it", metadata.Directory, directory)
 	}
 }

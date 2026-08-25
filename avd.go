@@ -152,7 +152,7 @@ func ensureAVDWithDependencies(ctx context.Context, profile AVDProfile, deps avd
 	if err != nil {
 		return AVD{}, fmt.Errorf("ensure AVD %q: %w", normalized.Name, err)
 	}
-	existingConfig, _, found, err := androidsdk.AVDConfig(normalized.Name, homes)
+	existing, found, err := androidsdk.AVDConfig(normalized.Name, homes)
 	if err != nil {
 		return AVD{}, fmt.Errorf("ensure AVD %q: %w", normalized.Name, err)
 	}
@@ -170,7 +170,7 @@ func ensureAVDWithDependencies(ctx context.Context, profile AVDProfile, deps avd
 		)
 	}
 	if found {
-		if err := verifyAVDConfig(existingConfig, root, &normalized); err != nil {
+		if err := verifyAVDConfig(existing.Values, root, &normalized); err != nil {
 			return AVD{}, fmt.Errorf("ensure AVD %q: %w", normalized.Name, err)
 		}
 		if err := ensureSystemImage(ctx, root, &normalized, imagePackage, deps); err != nil {
@@ -545,14 +545,14 @@ func registeredAVDMatches(
 	if !containsExactString(listedAVDs, name) {
 		return false, nil
 	}
-	values, _, found, err := androidsdk.AVDConfig(name, homes)
+	metadata, found, err := androidsdk.AVDConfig(name, homes)
 	if err != nil {
 		return false, err
 	}
 	if !found {
 		return false, fmt.Errorf("emulator lists the AVD but its config.ini was not found")
 	}
-	if err := verifyAVDConfig(values, sdkRoot, profile); err != nil {
+	if err := verifyAVDConfig(metadata.Values, sdkRoot, profile); err != nil {
 		return false, err
 	}
 	return true, nil

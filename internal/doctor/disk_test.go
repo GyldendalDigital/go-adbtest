@@ -578,6 +578,18 @@ func TestParseEmulatorSizeMirrorsTheEmulatorGrammar(t *testing.T) {
 		{"7340032K", 7340032 << 10},
 		{"512K", 512 << 10},
 		{"10G", 10 << 30},
+		// The unit letter is the last thing that matters; the emulator ignores
+		// whatever follows it. Each of these was measured at 8601.60 MiB.
+		{"7Gi", 7 << 30},
+		{"7Gxyz", 7 << 30},
+		{"7GiBB", 7 << 30},
+		{"7Gigabytes", 7 << 30},
+		{"7168MiB", 7 << 30},
+		{"7340032KB", 7 << 30},
+		{"7G ", 7 << 30},
+		// M is the unit and the trailing g is ignored, not the other way round.
+		{"7168Mg", 7168 << 20},
+		{"7Mg", 7 << 20},
 	}
 	for _, test := range accepted {
 		t.Run("accept/"+test.raw, func(t *testing.T) {
@@ -587,10 +599,11 @@ func TestParseEmulatorSizeMirrorsTheEmulatorGrammar(t *testing.T) {
 			}
 		})
 	}
-	// Every one of these was measured as rejected by emulator 36.6.11.0, which
-	// then falls back to its own default size.
+	// The emulator rejects each of these and falls back to its own default size.
+	// "7 G", "7 GB", "7168 M", "7516192768B", "7T", "7.5G", "0x7", "7xG", "junk"
+	// and "-1" were measured directly; the rest share their shape.
 	rejected := []string{
-		"7 G", "7 GB", "7168 M", "512 MB", "7516192768B", "7T", "7.5G", "0x7",
+		"7 G", "7 GB", "7168 M", "512 MB", "7516192768B", "7T", "7.5G", "0x7", "7xG",
 		"", "   ", "junk", "-1", "-2G", "G", "B", "18446744073709551615G",
 		"99999999999999999999",
 	}
@@ -667,5 +680,33 @@ func TestProductionAVDDiskReportsAnAbsentAVD(t *testing.T) {
 	disk, found, err := productionAVDDisk("go_test", []string{t.TempDir()})
 	if err != nil || found || disk.Created {
 		t.Fatalf("productionAVDDisk() = %+v, %v, %v", disk, found, err)
+	}
+}
+
+func TestAvailableFromStatfsRejectsAnUnmeasurableBlockSize(t *testing.T) {
+	// Zero free space and an unmeasurable filesystem must not look alike: the
+	// first is a failure, the second is not.
+	if _, err := availableFromStatfs(1<<20, 0); err == nil {
+		t.Fatal("availableFromStatfs() accepted a zero block size")
+	}
+	if _, err := availableFromStatfs(1<<20, -4096); err == nil {
+		t.Fatal("availableFromStatfs() accepted a negative block size")
+	}
+}
+
+func TestAvailableFromStatfsSaturatesRatherThanWrapping(t *testing.T) {
+	got, err := availableFromStatfs(math.MaxUint64, 4096)
+	if err != nil {
+		t.Fatalf("availableFromStatfs() error: %v", err)
+	}
+	if got != math.MaxUint64 {
+		t.Fatalf("availableFromStatfs() = %d, want saturation", got)
+	}
+}
+
+func TestAvailableFromStatfsMultipliesBlocksByBlockSize(t *testing.T) {
+	got, err := availableFromStatfs(128, 4096)
+	if err != nil || got != 128*4096 {
+		t.Fatalf("availableFromStatfs() = %d, %v, want %d", got, err, 128*4096)
 	}
 }
