@@ -42,7 +42,9 @@ filesystem holding the AVD content directory has **1.2x** the configured
 to create userdata partition`, but that goes to the emulator's own output,
 which `emulator.Start` writes to stdout rather than attaching to the error.
 What a go-adbtest log shows instead is `emulator process exited before its
-serial was detected`, which reads like a crash or a slow boot and is neither.
+serial was detected` — but that error now carries the emulator's own account of
+what happened; see [When the emulator fails to
+start](#when-the-emulator-fails-to-start).
 
 Two figures are worth budgeting for, and they differ by provenance:
 
@@ -71,6 +73,32 @@ On macOS the figure is `statfs`'s unprivileged-available space, which is what
 and Time Machine local snapshots. Expect doctor's number to be the lower one.
 The emulator's own check was measured on Linux, so treat a macOS verdict as
 indicative rather than exact.
+
+### When the emulator fails to start
+
+When `Setup` or `emulator.Start` fails before the device is usable, the returned
+error carries the emulator's own recent output as well as the exit status:
+
+```
+emulator process exited before its serial was detected: exit status 1
+emulator reported: FATAL        | Not enough space to create userdata partition. Available: 3157.66 MB at /run/user/1000/ci.avd, need 12288.00 MB.
+last emulator output:
+INFO         | Android emulator version 36.6.11.0
+INFO         | Increasing RAM size to 2048MB
+FATAL        | Not enough space to create userdata partition. Available: 3157.66 MB at /run/user/1000/ci.avd, need 12288.00 MB.
+```
+
+The output is still streamed live to stdout and stderr exactly as before, on the
+same streams the emulator wrote it to. What is new is that a copy is retained
+and attached to the error, because the live copy scrolls past in a CI log a long
+way from the failure that a consumer actually handles.
+
+Two details are deliberate. The `emulator reported:` line is the last thing the
+emulator marked `ERROR` or `FATAL` **wherever it appeared**, not merely the last
+line: an unsupported `-gpu` value reports at line 6 of more than a hundred and
+then boots anyway, so a tail alone would show nothing. And the adb public key is
+dropped from the retained copy — the emulator logs it twice per boot, it carries
+your user and host name, and it is about a fifth of a normal startup log.
 
 ## Quick start
 

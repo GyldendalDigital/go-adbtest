@@ -3,6 +3,7 @@ package emulator
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -301,7 +302,7 @@ printf '%s\n' "$@" >> "$ADBTEST_ARGS_FILE"
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start fake emulator: %v", err)
 	}
-	instance := newInstance(cmd, false)
+	instance := newInstance(cmd, false, nil, 0)
 	instance.Serial = "emulator-5554"
 	instance.ADB = &adb.Client{Serial: instance.Serial, ADBPath: fakeADB}
 	instance.shutdownTimeout = 20 * time.Millisecond
@@ -345,7 +346,7 @@ func TestInstance_KillFallsBackImmediatelyWhenADBCommandFails(t *testing.T) {
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start fake emulator: %v", err)
 	}
-	instance := newInstance(cmd, false)
+	instance := newInstance(cmd, false, nil, 0)
 	instance.Serial = "emulator-5554"
 	instance.ADB = &adb.Client{Serial: instance.Serial, ADBPath: fakeADB}
 	instance.shutdownTimeout = 5 * time.Second
@@ -386,6 +387,9 @@ func testStartDependencies() startDependencies {
 			return exec.Command("sh", "-c", "while :; do :; done")
 		},
 		pollInterval: time.Millisecond,
+		output:       io.Discard,
+		errOutput:    io.Discard,
+		drainGrace:   50 * time.Millisecond,
 	}
 }
 

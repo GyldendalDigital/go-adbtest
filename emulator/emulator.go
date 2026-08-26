@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strconv"
@@ -21,8 +22,13 @@ const (
 	defaultBootTimeout     = 120 * time.Second
 	defaultPollInterval    = time.Second
 	defaultShutdownTimeout = 10 * time.Second
-	minimumMemoryMB        = 1536
-	maximumMemoryMB        = 8192
+	// defaultDrainGrace bounds the wait for the emulator's final output on a
+	// failing start. It is short because the output is already in the kernel
+	// pipe by the time the process is reaped; the wait exists only to order our
+	// reader against that, not to wait on the emulator.
+	defaultDrainGrace = 250 * time.Millisecond
+	minimumMemoryMB   = 1536
+	maximumMemoryMB   = 8192
 )
 
 // Config holds emulator launch options.
@@ -67,7 +73,17 @@ type Instance struct {
 	killOnce         sync.Once
 	killErr          error
 	shutdownTimeout  time.Duration
+	drainGrace       time.Duration
 	ownsProcessGroup bool
+	// log retains the emulator's own output so a startup failure can carry it.
+	log *startupLog
+	// drained closes when every reader goroutine has finished.
+	drained chan struct{}
+	// readEnds are this process's ends of the pipes handed to the emulator.
+	// Unblocking a reader means setting a deadline on these, never closing
+	// them while the emulator is alive: it holds the write ends directly and
+	// would take a SIGPIPE on its next log line.
+	readEnds []*os.File
 }
 
 // Start boots an emulator with the given config. Blocks until boot_completed=1.
@@ -84,6 +100,15 @@ type startDependencies struct {
 	shell        func(context.Context, *adb.Client, string) (string, error)
 	command      func(string, ...string) *exec.Cmd
 	pollInterval time.Duration
+	// output and errOutput receive the emulator's live output. Injected so a
+	// test can assert on it instead of writing to the test binary's own
+	// streams; production passes os.Stdout and os.Stderr, which is what the
+	// emulator's descriptors pointed at before this became a seam.
+	output    io.Writer
+	errOutput io.Writer
+	// drainGrace bounds how long a failing start waits for the emulator's last
+	// output before giving up on it.
+	drainGrace time.Duration
 }
 
 func productionStartDependencies() startDependencies {
@@ -96,6 +121,9 @@ func productionStartDependencies() startDependencies {
 		},
 		command:      exec.Command,
 		pollInterval: defaultPollInterval,
+		output:       os.Stdout,
+		errOutput:    os.Stderr,
+		drainGrace:   defaultDrainGrace,
 	}
 }
 
@@ -153,14 +181,40 @@ func startWithDependencies(cfg Config, deps startDependencies) (*Instance, error
 
 	args := buildArgs(cfg)
 	cmd := deps.command(emulatorPath, args...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+
+	// Two pipes, and the write ends assigned as *os.File.
+	//
+	// os/exec passes an *os.File descriptor to the child directly, but wraps
+	// any other io.Writer in a pipe plus a copying goroutine that Wait blocks
+	// on. The emulator's crashpad_handler reparents to init with its own
+	// process group and session while holding both descriptors, so killing the
+	// emulator's process group does not reach it: with a wrapped writer, Wait
+	// was measured still blocked 60 seconds after the emulator was reaped,
+	// which would hang Kill and Teardown. Owning the pipes keeps Wait at the
+	// 73 milliseconds it takes today.
+	//
+	// Two rather than one because assigning the same file to Stdout and Stderr
+	// makes os/exec collapse them onto one descriptor, which would move the
+	// emulator's stderr onto this process's stdout.
+	capture, err := newCapture(deps.output, deps.errOutput)
+	if err != nil {
+		return nil, err
+	}
+	cmd.Stdout = capture.stdoutWriter
+	cmd.Stderr = capture.stderrWriter
 	ownsProcessGroup := prepareEmulatorProcess(cmd)
 
 	if err := cmd.Start(); err != nil {
+		// Closing the write ends lets both readers see EOF and close their own,
+		// so a failed Start leaks neither goroutines nor descriptors.
+		capture.closeWriters()
 		return nil, fmt.Errorf("start emulator: %w", err)
 	}
-	inst := newInstance(cmd, ownsProcessGroup)
+	// The parent's copies of the write ends must close now, not on return:
+	// startWithDependencies does not return until boot completes or fails, and
+	// while this process holds a write end the pipe never reaches EOF.
+	capture.closeWriters()
+	inst := newInstance(cmd, ownsProcessGroup, capture, deps.drainGrace)
 	processCtx, stopProcessMonitor := context.WithCancel(ctx)
 	defer stopProcessMonitor()
 	go func() {
@@ -190,13 +244,26 @@ func startWithDependencies(cfg Config, deps startDependencies) (*Instance, error
 	return inst, nil
 }
 
-func newInstance(cmd *exec.Cmd, ownsProcessGroup bool) *Instance {
+// newInstance takes the capture explicitly so a caller cannot end up with a nil
+// log or a nil drained channel, which would make the failure paths block
+// forever or panic.
+func newInstance(cmd *exec.Cmd, ownsProcessGroup bool, capture *outputCapture, drainGrace time.Duration) *Instance {
+	if capture == nil {
+		capture = newDetachedCapture()
+	}
+	if drainGrace <= 0 {
+		drainGrace = defaultDrainGrace
+	}
 	instance := &Instance{
 		PID:              cmd.Process.Pid,
 		cmd:              cmd,
 		done:             make(chan struct{}),
 		shutdownTimeout:  defaultShutdownTimeout,
+		drainGrace:       drainGrace,
 		ownsProcessGroup: ownsProcessGroup,
+		log:              capture.log,
+		drained:          capture.drained,
+		readEnds:         capture.readEnds(),
 	}
 	go func() {
 		err := cmd.Wait()
@@ -263,9 +330,10 @@ func (i *Instance) waitForBoot(
 				return err
 			}
 			if lastErr != nil {
-				return fmt.Errorf("emulator %s did not boot: %w (last adb error: %v)", i.Serial, ctx.Err(), lastErr)
+				return i.withStartupOutput(
+					fmt.Errorf("emulator %s did not boot: %w (last adb error: %v)", i.Serial, ctx.Err(), lastErr), false)
 			}
-			return fmt.Errorf("emulator %s did not boot: %w", i.Serial, ctx.Err())
+			return i.withStartupOutput(fmt.Errorf("emulator %s did not boot: %w", i.Serial, ctx.Err()), false)
 		case <-i.processDone():
 			stopTimer(timer)
 			return i.exitError("boot completed")
@@ -464,10 +532,53 @@ func (i *Instance) exitError(phase string) error {
 	i.stateMu.Lock()
 	waitErr := i.waitErr
 	i.stateMu.Unlock()
+	var err error
 	if waitErr != nil {
-		return fmt.Errorf("emulator process exited before %s: %w", phase, waitErr)
+		err = fmt.Errorf("emulator process exited before %s: %w", phase, waitErr)
+	} else {
+		err = fmt.Errorf("emulator process exited before %s", phase)
 	}
-	return fmt.Errorf("emulator process exited before %s", phase)
+	// The process is gone, so its output is complete in the kernel pipe - but
+	// nothing orders our reader against Wait returning. Waiting for the readers
+	// here is what stops the explanation being dropped; measured without it,
+	// the emulator's own FATAL was missing from roughly one failure in twenty.
+	return i.withStartupOutput(err, true)
+}
+
+// withStartupOutput attaches the emulator's own recent output to err.
+//
+// waitForDrain must be false while the emulator is still running: the pipes do
+// not reach EOF until it exits, so waiting would burn the whole grace on every
+// boot timeout for output that is already captured.
+func (i *Instance) withStartupOutput(err error, waitForDrain bool) error {
+	if i == nil || i.log == nil {
+		return err
+	}
+	if waitForDrain && i.drained != nil {
+		timer := time.NewTimer(i.drainGrace)
+		select {
+		case <-i.drained:
+		case <-timer.C:
+			// A descendant outside the process group still holds the write end.
+			// Stop the readers rather than wait on a process we cannot signal.
+			i.stopReaders()
+		}
+		stopTimer(timer)
+	}
+	summary := i.log.Summary()
+	if summary == "" {
+		return err
+	}
+	return fmt.Errorf("%w\n%s", err, summary)
+}
+
+// stopReaders unblocks the reader goroutines without closing their files. The
+// emulator holds the write ends directly, so closing while it is alive would
+// kill it with SIGPIPE on its next log line.
+func (i *Instance) stopReaders() {
+	for _, end := range i.readEnds {
+		_ = end.SetReadDeadline(time.Now())
+	}
 }
 
 func (i *Instance) terminateAndWait() error {
@@ -492,11 +603,19 @@ func (i *Instance) terminateAndWait() error {
 
 	if i.done != nil {
 		<-i.done
+		// Safe only now the process is gone: while it was alive its write ends
+		// were live, and unblocking a reader early would strand output. A
+		// descendant that escaped the process group can still hold the write
+		// end, so without this the reader and its descriptor park for as long
+		// as that descendant lives - once per Start.
+		i.stopReaders()
 		return nil
 	}
 	if waitErr := i.cmd.Wait(); waitErr != nil && killErr != nil {
+		i.stopReaders()
 		return fmt.Errorf("wait for emulator process: %w", waitErr)
 	}
+	i.stopReaders()
 	return nil
 }
 
