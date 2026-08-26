@@ -59,18 +59,24 @@ const (
 	// ~2 MiB) plus room to notice before the bar is reached.
 	diskHeadroom = 256 << 20
 	// maxDataPartitionSize is the largest configured size this check models. It
-	// exists only so the 1.2x multiply cannot overflow; every realistic value
-	// is far below it and is compared exactly as configured.
-	maxDataPartitionSize = math.MaxUint64 / 6
+	// exists only so the rounded 1.2x multiply cannot overflow; every realistic
+	// value is far below it and is compared exactly as configured.
+	maxDataPartitionSize = (math.MaxUint64 - 4) / 6
 )
 
 // requiredBytes returns the free space the emulator demands before it will
-// create a userdata partition of the given size: exactly 1.2x.
+// create a userdata partition of the given size: 1.2x, rounded up.
+//
+// The emulator refuses when size*1.2 > available, so a host satisfies it only
+// at the ceiling of that product. Truncating would leave a one-byte window: at
+// exactly 7730941132 free against a 6 GiB partition the emulator compares
+// against 7730941132.8 and refuses, while a truncated requirement reports the
+// host as fine.
 func requiredBytes(dataPartition uint64) uint64 {
 	if dataPartition > maxDataPartitionSize {
 		dataPartition = maxDataPartitionSize
 	}
-	return dataPartition * 6 / 5
+	return (dataPartition*6 + 4) / 5
 }
 
 // sizeOrigin records where a userdata partition size came from, so the report
@@ -220,11 +226,23 @@ func productionAVDDisk(name string, homes []string) (avdDiskInfo, bool, error) {
 	}
 	// The raw image, not the qcow2 overlay: an AVD can carry the overlay alone,
 	// and the emulator still runs its check in that state.
+	//
+	// Only a positive absence counts as uncreated. A permission or I/O error
+	// while probing says nothing about whether the partition exists, and
+	// treating it as absent would move a warm AVD into the branch that can
+	// fail, which is the opposite of the creation-only semantics.
 	info, statErr := os.Stat(filepath.Join(metadata.Directory, "userdata-qemu.img"))
+	created := true
+	switch {
+	case statErr == nil:
+		created = info.Mode().IsRegular()
+	case errors.Is(statErr, os.ErrNotExist):
+		created = false
+	}
 	return avdDiskInfo{
 		Values:    metadata.Values,
 		Directory: metadata.Directory,
-		Created:   statErr == nil && info.Mode().IsRegular(),
+		Created:   created,
 	}, true, nil
 }
 
@@ -276,7 +294,8 @@ func (c *checker) checkDiskSpace() {
 	// feature flag, so a smaller configured partition may be honoured and this
 	// requirement may be an overestimate.
 	shortfall := Failure
-	if (origin == sizeRaised || origin == sizeDefaulted) && derivedSizeIsUncertain(disk.Values) {
+	if (origin == sizeRaised || origin == sizeDefaulted || origin == sizeUnparseable) &&
+		derivedSizeIsUncertain(disk.Values) {
 		shortfall = Warning
 	}
 
@@ -374,7 +393,7 @@ func (c *checker) checkDiskSpaceWithoutAVD() {
 		c.add(Result{
 			Severity: Warning,
 			Name:     "disk space",
-			Detail: fmt.Sprintf("no AVD was selected, so no userdata partition size was compared, but %s has %s free, below the %s the smallest partition the emulator will create needs, so no AVD can be created here",
+			Detail: fmt.Sprintf("no AVD was selected, so no userdata partition size was compared, but %s has %s free, below the %s an AVD needs on any image from API 24 up",
 				measured, formatMiB(available), formatMiB(floor)),
 			Hint: fmt.Sprintf("free space on the volume holding %s or point ANDROID_AVD_HOME at a larger volume; an AVD provisioned by EnsureAVD needs %s",
 				measured, formatGiB(provisioned)),
@@ -391,9 +410,16 @@ func (c *checker) checkDiskSpaceWithoutAVD() {
 	})
 }
 
-// measureAvailable bounds the measurement the way every other external step in
-// this package is bounded. statfs does not observe a context, and a hung NFS or
-// autofs home would otherwise make adbtest doctor unkillable. It returns the
+// measureAvailable bounds the wait the way every other external step in this
+// package is bounded. statfs does not observe a context, and a hung NFS or
+// autofs home would otherwise make adbtest doctor unkillable.
+//
+// The bound is on the wait, not on the syscall: nothing can cancel a statfs in
+// progress. The goroutine sends to a buffered channel so it never blocks on a
+// timed-out caller, and it ends as soon as the syscall returns, but against a
+// permanently wedged mount it stays parked for the process lifetime. That is
+// acceptable for a short-lived CLI and is why Check is not meant for repeated
+// calls inside a long-running process. It returns the
 // path actually measured, which differs from the requested one when the
 // requested path does not exist yet.
 func (c *checker) measureAvailable(path string) (available uint64, measured string, err error) {
@@ -459,14 +485,32 @@ func describeOrigin(origin sizeOrigin, format func(uint64) string) string {
 
 // derivedSizeIsUncertain reports whether the AVD targets an API level where the
 // emulator's 6 GiB minimum is feature-flagged rather than unconditional. Both a
-// raised size and an absent one come out of that same clamp, so below API 24
-// neither requirement can be relied on.
+// raised size, an absent one and an unparseable one all come out of that same
+// clamp, so below API 24 none of those requirements can be relied on.
 func derivedSizeIsUncertain(values map[string]string) bool {
 	target := strings.TrimPrefix(strings.TrimSpace(values["target"]), "android-")
 	level, err := strconv.Atoi(target)
 	return err == nil && level < 24
 }
 
+// doctorCommand renders a rerun command. An AVD ID only has to be free of
+// control characters, so one containing a space or a shell metacharacter would
+// otherwise produce a hint that does not pass the same ID back to the flag.
 func doctorCommand(avd string) string {
-	return fmt.Sprintf("adbtest doctor --avd %s", avd)
+	return "adbtest doctor --avd " + quoteArgument(avd)
+}
+
+func quoteArgument(value string) string {
+	if value == "" {
+		return `""`
+	}
+	for _, character := range []byte(value) {
+		if character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' ||
+			character >= '0' && character <= '9' || character == '.' || character == '-' ||
+			character == '_' {
+			continue
+		}
+		return strconv.Quote(value)
+	}
+	return value
 }

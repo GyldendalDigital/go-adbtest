@@ -22,7 +22,7 @@ import (
 // doctor and the emulator agree, which is the whole value of the check.
 const (
 	incidentDataPartition = "6442450944" // 6 GiB, the emulator's default
-	incidentRequired      = 7730941132   // 7372.80 MiB
+	incidentRequired      = 7730941133   // 7372.80 MiB, the ceiling of 6 GiB x 1.2
 	incidentAvailable     = 6956766986   // 6634.49 MiB
 	incidentComfortable   = incidentRequired + diskHeadroom
 	avdDirectory          = "/user/.android/avd/expected_avd.avd"
@@ -378,7 +378,7 @@ func TestCheckDiskSpaceWithoutAnAVDWarnsBelowTheSmallestPossibleRequirement(t *t
 	if result.Severity != Warning {
 		t.Fatalf("disk space result = %+v, want Warning", result)
 	}
-	for _, want := range []string{"no AVD was selected", "7372.80 MiB", "no AVD can be created here"} {
+	for _, want := range []string{"no AVD was selected", "7372.80 MiB", "from API 24 up"} {
 		if !strings.Contains(result.Detail, want) {
 			t.Fatalf("detail %q does not contain %q", result.Detail, want)
 		}
@@ -607,7 +607,7 @@ func TestRequiredBytesReproducesTheEmulatorArithmetic(t *testing.T) {
 }
 
 func TestRequiredBytesCannotOverflow(t *testing.T) {
-	if got := requiredBytes(math.MaxUint64); got != maxDataPartitionSize*6/5 {
+	if got := requiredBytes(math.MaxUint64); got != (maxDataPartitionSize*6+4)/5 {
 		t.Fatalf("requiredBytes(MaxUint64) = %d, want the capped requirement", got)
 	}
 }
@@ -815,5 +815,80 @@ func TestAvailableFromStatfsMultipliesBlocksByBlockSize(t *testing.T) {
 	got, err := availableFromStatfs(128, 4096)
 	if err != nil || got != 128*4096 {
 		t.Fatalf("availableFromStatfs() = %d, %v, want %d", got, err, 128*4096)
+	}
+}
+
+// Copilot review, PR #4: the emulator refuses when size*1.2 > available, so a
+// truncated requirement leaves a one-byte window where doctor passes a host the
+// emulator will refuse.
+func TestRequiredBytesRoundsUpRatherThanTruncating(t *testing.T) {
+	// 6 GiB x 1.2 = 7730941132.8 exactly.
+	if got := requiredBytes(6 << 30); got != 7730941133 {
+		t.Fatalf("requiredBytes(6 GiB) = %d, want the ceiling 7730941133", got)
+	}
+	// A size whose product is exact must not gain a spurious byte.
+	if got := requiredBytes(5 << 30); got != 5<<30*6/5 {
+		t.Fatalf("requiredBytes(5 GiB) = %d, want an exact product left alone", got)
+	}
+}
+
+// Copilot review, PR #4: an indeterminate probe must not move a warm AVD into
+// the branch that can fail.
+func TestProductionAVDDiskTreatsAnUnreadableProbeAsCreated(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses file permissions")
+	}
+	home := t.TempDir()
+	directory := filepath.Join(home, "go_test.avd")
+	if err := os.MkdirAll(directory, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "config.ini"), []byte("AvdId=go_test\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, "go_test.ini"), []byte("path="+directory+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Deny traversal so stat fails with EACCES rather than ENOENT.
+	if err := os.Chmod(directory, 0o644); err != nil {
+		t.Skipf("chmod is unsupported here: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(directory, 0o755) })
+
+	disk, found, err := productionAVDDisk("go_test", []string{home})
+	if err != nil || !found {
+		t.Skipf("config.ini became unreadable too: %v, %v", found, err)
+	}
+	if !disk.Created {
+		t.Fatal("productionAVDDisk() treated an unreadable probe as an absent partition")
+	}
+}
+
+// Copilot review, PR #4: an AVD ID only has to be free of control characters.
+func TestDoctorCommandQuotesAnAwkwardAVDName(t *testing.T) {
+	if got := doctorCommand("go_test-1.0"); got != "adbtest doctor --avd go_test-1.0" {
+		t.Fatalf("doctorCommand() = %q, want an ordinary name left bare", got)
+	}
+	got := doctorCommand("foo bar")
+	if !strings.Contains(got, `"foo bar"`) {
+		t.Fatalf("doctorCommand() = %q, want the name quoted", got)
+	}
+	if strings.Contains(doctorCommand("a;rm -rf /"), "; rm") {
+		t.Fatalf("doctorCommand() emitted an unquoted shell metacharacter")
+	}
+}
+
+// Copilot review, PR #4: an unparseable size falls back to the same clamp.
+func TestCheckDiskSpaceWillNotFailOnAnUnparseableSizeBelowTheFlag(t *testing.T) {
+	values := map[string]string{"disk.dataPartition.size": "banana", "target": "android-23"}
+	disk := avdDiskInfo{Values: values, Directory: avdDirectory}
+	deps, _ := diskDependencies("expected_avd", disk, incidentAvailable)
+
+	report := runDiskCheck(t, Options{AVD: "expected_avd"}, deps)
+	if result := findResult(t, report, "disk space"); result.Severity != Warning {
+		t.Fatalf("disk space result = %+v, want Warning where the requirement is uncertain", result)
+	}
+	if report.ExitCode() != 0 {
+		t.Fatalf("ExitCode() = %d, want 0", report.ExitCode())
 	}
 }

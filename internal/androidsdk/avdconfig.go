@@ -70,10 +70,14 @@ func findAVD(name string, homes []string) (directory, configPath string, found b
 			}
 			directory := filepath.Clean(avdPath)
 			configPath := filepath.Join(directory, "config.ini")
+			// The directory travels with these errors: it is the location a
+			// caller would still want to inspect or measure, and discarding it
+			// would break AVDMetadata's promise to retain it when Values are
+			// unavailable.
 			if configInfo, statErr := os.Stat(configPath); statErr != nil {
-				return "", "", false, fmt.Errorf("AVD metadata %q points to missing config %q: %w", metadataPath, configPath, statErr)
+				return directory, "", false, fmt.Errorf("AVD metadata %q points to missing config %q: %w", metadataPath, configPath, statErr)
 			} else if !configInfo.Mode().IsRegular() {
-				return "", "", false, fmt.Errorf("AVD config %q is not a regular file", configPath)
+				return directory, "", false, fmt.Errorf("AVD config %q is not a regular file", configPath)
 			}
 			return directory, configPath, true, nil
 		}

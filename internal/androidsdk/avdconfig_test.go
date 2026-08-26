@@ -286,3 +286,29 @@ func TestAVDConfigReportsAnUnreadableConfigButStillNamesTheDirectory(t *testing.
 		t.Fatalf("AVDConfig() directory = %q, want %q so callers can still measure it", metadata.Directory, directory)
 	}
 }
+
+// Copilot review, PR #4: the resolved directory must survive the error paths,
+// or a caller cannot report free space for a volume it has already located.
+func TestFindAVDKeepsTheDirectoryWhenTheConfigIsUnusable(t *testing.T) {
+	home := t.TempDir()
+	directory := filepath.Join(home, "go_test.avd")
+	if err := os.MkdirAll(directory, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeAVDMetadata(t, home, "go_test", "path="+directory+"\n")
+
+	gotDirectory, _, found, err := findAVD("go_test", []string{home})
+	if err == nil || found {
+		t.Fatalf("findAVD() = %v, %v, want a missing-config rejection", found, err)
+	}
+	if gotDirectory != directory {
+		t.Fatalf("findAVD() directory = %q, want %q retained through the error", gotDirectory, directory)
+	}
+
+	if err := os.MkdirAll(filepath.Join(directory, "config.ini"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if gotDirectory, _, _, err = findAVD("go_test", []string{home}); err == nil || gotDirectory != directory {
+		t.Fatalf("findAVD() = %q, %v, want the directory retained for a non-regular config", gotDirectory, err)
+	}
+}
