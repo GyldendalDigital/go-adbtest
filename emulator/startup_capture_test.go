@@ -10,6 +10,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/GyldendalDigital/go-adbtest/adb"
 )
 
 // earlyExitDependencies drives a start that fails because the emulator process
@@ -56,8 +58,27 @@ func TestStartAttachesTheEmulatorsOwnExplanation(t *testing.T) {
 	if !strings.Contains(err.Error(), "Not enough space to create userdata partition") {
 		t.Fatalf("Start error = %v, want the emulator's own FATAL attached", err)
 	}
-	if !strings.Contains(err.Error(), "emulator reported:") {
-		t.Fatalf("Start error = %v, want the problem line lifted", err)
+	// The FATAL is the last line here, as it is in every hard failure, so it is
+	// carried by the tail alone rather than lifted and printed twice.
+	if strings.Count(err.Error(), "Not enough space") != 1 {
+		t.Fatalf("Start error = %v, want the FATAL exactly once", err)
+	}
+}
+
+// A misconfiguration reports early and the emulator carries on, so here the
+// explanation is not the last line and must be lifted out of the log.
+func TestStartLiftsAProblemThatIsNotTheLastLine(t *testing.T) {
+	script := "printf 'ERROR        | gpuChoiceBasedOnGpuOptions: not valid\\n'; " +
+		"i=0; while [ $i -lt 40 ]; do printf 'INFO         | progress\\n'; i=$((i+1)); done; exit 1"
+	deps, _ := earlyExitDependencies(t, script)
+
+	_, err := startWithDependencies(Config{AVD: "Test", Timeout: 2 * time.Second}, deps)
+	if err == nil {
+		t.Fatal("Start returned no error")
+	}
+	if !strings.Contains(err.Error(), "emulator reported: ") ||
+		!strings.Contains(err.Error(), "gpuChoiceBasedOnGpuOptions") {
+		t.Fatalf("Start error = %v, want the early problem lifted past the tail", err)
 	}
 }
 
@@ -119,7 +140,9 @@ func TestStartCapturesDespiteASlowLiveWriter(t *testing.T) {
 	// the reader tees before it records, those last bytes sit unread in the
 	// kernel pipe and the explanation is lost.
 	deps, _ := earlyExitDependencies(t, "printf '%s\\n' "+shellQuote(userdataFatal)+"; exit 1")
-	deps.output = slowWriter{delay: 2 * time.Millisecond}
+	// Slower than drainGrace on purpose: with the tee first, the reader parks
+	// in this write and the emulator's last bytes stay unread in the pipe.
+	deps.output = slowWriter{delay: 300 * time.Millisecond}
 
 	_, err := startWithDependencies(Config{AVD: "Test", Timeout: 2 * time.Second}, deps)
 	if err == nil || !strings.Contains(err.Error(), "Not enough space") {
@@ -191,6 +214,9 @@ func shellQuote(value string) string {
 
 func openDescriptors(t *testing.T) int {
 	t.Helper()
+	// Let any earlier test's readers finish unwinding, so the baseline is not
+	// inflated in a way that would hide a real leak.
+	time.Sleep(50 * time.Millisecond)
 	entries, err := os.ReadDir("/proc/self/fd")
 	if err != nil {
 		t.Skipf("descriptor accounting needs /proc: %v", err)
@@ -211,5 +237,56 @@ func waitForDescriptors(t *testing.T, before int) {
 			t.Fatalf("descriptors grew from %d to %d", before, after)
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// The boot-timeout path attaches without waiting, because the emulator is still
+// running and the pipes will not reach EOF at all.
+func TestBootTimeoutAttachesOutputWithoutWaitingForDrain(t *testing.T) {
+	deps := testStartDependencies()
+	deps.drainGrace = 3 * time.Second
+	deps.command = func(string, ...string) *exec.Cmd {
+		return exec.Command("sh", "-c",
+			"printf 'ERROR        | gpuChoiceBasedOnGpuOptions: not valid\\n'; while :; do sleep 0.05; done")
+	}
+	calls := 0
+	deps.devices = func(context.Context) ([]string, error) {
+		calls++
+		if calls == 1 {
+			return nil, nil
+		}
+		return []string{"emulator-5554"}, nil
+	}
+	deps.shell = func(context.Context, *adb.Client, string) (string, error) { return "0", nil }
+
+	started := time.Now()
+	_, err := startWithDependencies(Config{AVD: "Test", Timeout: 500 * time.Millisecond}, deps)
+	elapsed := time.Since(started)
+
+	if err == nil || !strings.Contains(err.Error(), "did not boot") {
+		t.Fatalf("Start error = %v, want a boot timeout", err)
+	}
+	if !strings.Contains(err.Error(), "gpuChoiceBasedOnGpuOptions") {
+		t.Fatalf("Start error = %v, want the emulator's own output attached", err)
+	}
+	// Waiting for a drain that cannot happen would burn the whole grace here.
+	if elapsed > 2*time.Second {
+		t.Fatalf("Start took %v; the boot-timeout path must not wait for EOF", elapsed)
+	}
+}
+
+// The ring wraps through the real pipe and the 32 KiB reader buffer, not just
+// in a unit test.
+func TestStartKeepsTheTailWhenOutputExceedsTheRing(t *testing.T) {
+	deps, _ := earlyExitDependencies(t,
+		"i=0; while [ $i -lt 3000 ]; do printf 'INFO         | filler line %d\n' $i; i=$((i+1)); done; "+
+			"printf '%s\n' "+shellQuote(userdataFatal)+"; exit 1")
+
+	_, err := startWithDependencies(Config{AVD: "Test", Timeout: 10 * time.Second}, deps)
+	if err == nil || !strings.Contains(err.Error(), "Not enough space") {
+		t.Fatalf("Start error = %v, want the newest output kept across a wrap", err)
+	}
+	if len(err.Error()) > 8<<10 {
+		t.Fatalf("Start error is %d bytes, want it bounded", len(err.Error()))
 	}
 }

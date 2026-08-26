@@ -22,6 +22,13 @@ const (
 	defaultBootTimeout     = 120 * time.Second
 	defaultPollInterval    = time.Second
 	defaultShutdownTimeout = 10 * time.Second
+	// stopReadersWindow is how long a reader gets to finish draining once it is
+	// asked to stop. It must be in the future: an expired read deadline is
+	// checked before the read syscall, so setting one in the past discards
+	// whatever is already sitting in the pipe rather than collecting it -
+	// measured losing the emulator's FATAL on every run when the live writer
+	// stalled past the grace.
+	stopReadersWindow = 100 * time.Millisecond
 	// defaultDrainGrace bounds the wait for the emulator's final output on a
 	// failing start. It is short because the output is already in the kernel
 	// pipe by the time the process is reaped; the wait exists only to order our
@@ -186,7 +193,7 @@ func startWithDependencies(cfg Config, deps startDependencies) (*Instance, error
 	//
 	// os/exec passes an *os.File descriptor to the child directly, but wraps
 	// any other io.Writer in a pipe plus a copying goroutine that Wait blocks
-	// on. The emulator's crashpad_handler reparents to init with its own
+	// on. The emulator's crashpad_handler reparents away with its own
 	// process group and session while holding both descriptors, so killing the
 	// emulator's process group does not reach it: with a wrapped writer, Wait
 	// was measured still blocked 60 seconds after the emulator was reaped,
@@ -349,6 +356,11 @@ func (i *Instance) Kill() error {
 	}
 	i.killOnce.Do(func() {
 		i.killErr = i.kill()
+		// Every way kill can return leaves the process gone, and several of
+		// them return without reaching terminateAndWait - a Kill after the
+		// emulator has already exited, and the non-unix teardown, among them.
+		// Releasing here covers all of them at once.
+		i.stopReaders()
 	})
 	return i.killErr
 }
@@ -378,6 +390,13 @@ func (i *Instance) kill() error {
 	select {
 	case <-i.processDone():
 		cancel()
+		// The graceful path returns without terminateAndWait, so it is the one
+		// exit that would otherwise never release the readers. A descendant
+		// outside the process group keeps the write ends open, parking both
+		// reader goroutines and both descriptors for as long as it lives -
+		// once per Start, in the ordinary case where the emulator shut down
+		// exactly as asked.
+		i.stopReaders()
 		return nil
 	case <-ctx.Done():
 		cancel()
@@ -539,9 +558,9 @@ func (i *Instance) exitError(phase string) error {
 		err = fmt.Errorf("emulator process exited before %s", phase)
 	}
 	// The process is gone, so its output is complete in the kernel pipe - but
-	// nothing orders our reader against Wait returning. Waiting for the readers
-	// here is what stops the explanation being dropped; measured without it,
-	// the emulator's own FATAL was missing from roughly one failure in twenty.
+	// nothing orders our reader against Wait returning, and a slow live writer
+	// can leave the last bytes unread. Against a real failing emulator the wait
+	// costs under a millisecond, so it is bought cheaply.
 	return i.withStartupOutput(err, true)
 }
 
@@ -559,9 +578,18 @@ func (i *Instance) withStartupOutput(err error, waitForDrain bool) error {
 		select {
 		case <-i.drained:
 		case <-timer.C:
-			// A descendant outside the process group still holds the write end.
-			// Stop the readers rather than wait on a process we cannot signal.
+			// A descendant outside the process group still holds the write end,
+			// and will hold it for as long as it lives. Stop the readers rather
+			// than wait on a process we cannot signal - but give them their
+			// window to finish, and read the log after they have taken it, so
+			// the summary is not assembled from a partly drained pipe.
 			i.stopReaders()
+			settle := time.NewTimer(2 * stopReadersWindow)
+			select {
+			case <-i.drained:
+			case <-settle.C:
+			}
+			stopTimer(settle)
 		}
 		stopTimer(timer)
 	}
@@ -572,12 +600,17 @@ func (i *Instance) withStartupOutput(err error, waitForDrain bool) error {
 	return fmt.Errorf("%w\n%s", err, summary)
 }
 
-// stopReaders unblocks the reader goroutines without closing their files. The
-// emulator holds the write ends directly, so closing while it is alive would
-// kill it with SIGPIPE on its next log line.
+// stopReaders releases the reader goroutines by deadline rather than by
+// closing their files, so a reader parked in Read returns rather than being
+// interrupted mid-copy. Each reader then closes its own read end as it unwinds.
+//
+// Every call site runs after the process is known to be gone. That ordering is
+// what makes this safe: the emulator holds the write ends directly, and closing
+// a read end while it is alive would kill it with SIGPIPE on its next log line.
 func (i *Instance) stopReaders() {
+	deadline := time.Now().Add(stopReadersWindow)
 	for _, end := range i.readEnds {
-		_ = end.SetReadDeadline(time.Now())
+		_ = end.SetReadDeadline(deadline)
 	}
 }
 
@@ -590,6 +623,9 @@ func (i *Instance) terminateAndWait() error {
 		if i.done != nil {
 			<-i.done
 		}
+		// The non-unix default, and the path a failed start takes once the
+		// emulator has already exited.
+		i.stopReaders()
 		return nil
 	}
 
