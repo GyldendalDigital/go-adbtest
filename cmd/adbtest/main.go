@@ -66,7 +66,7 @@ func runDoctor(
 	flags := flag.NewFlagSet("adbtest doctor", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	var options doctor.Options
-	flags.StringVar(&options.AVD, "avd", "", "require an existing command-line AVD ID")
+	flags.StringVar(&options.AVD, "avd", "", "require an existing command-line AVD ID and size its userdata partition")
 	flags.StringVar(&options.DeviceProfile, "device-profile", "small_phone", "required avdmanager hardware-profile ID")
 	flags.Usage = func() { writeDoctorUsage(flags.Output()) }
 	if err := flags.Parse(args); err != nil {
@@ -107,7 +107,7 @@ func writeDoctorUsage(writer io.Writer) {
 	_, _ = fmt.Fprintln(writer, "Usage: adbtest doctor [options]")
 	_, _ = fmt.Fprintln(writer)
 	_, _ = fmt.Fprintln(writer, "Options:")
-	_, _ = fmt.Fprintln(writer, "  --avd NAME                 require an existing command-line AVD ID")
+	_, _ = fmt.Fprintln(writer, "  --avd NAME                 require an existing AVD and size its userdata partition")
 	_, _ = fmt.Fprintln(writer, "  --device-profile PROFILE   required hardware profile (default small_phone)")
 	_, _ = fmt.Fprintln(writer, "  -h, --help                 show this help")
 }

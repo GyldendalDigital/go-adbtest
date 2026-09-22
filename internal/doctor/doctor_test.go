@@ -371,6 +371,12 @@ func healthyDependencies() (dependencies, *[]string) {
 		findTool: func(_ string, name string) (string, error) {
 			return "/sdk/" + name, nil
 		},
+		// Comfortably above any requirement so the disk check is inert unless a
+		// test overrides it deliberately.
+		availableDiskBytes: func(path string) (uint64, string, error) { return 512 << 30, path, nil },
+		avdDisk: func(string, []string) (avdDiskInfo, bool, error) {
+			return avdDiskInfo{}, false, nil
+		},
 		commandTimeout: 100 * time.Millisecond,
 	}
 	deps.run = func(

@@ -192,11 +192,21 @@ socket/forward ownership, current emulator GPU defaults, and all lint findings.
 | 2026-08-03 | Closed independent provisioning reviews | Commits `c8362d1` and `9e5d936` enforce one coherent SDK/AVD home, host-native metadata, root-serialized creation, collision recovery, current Android home variables, non-destructive profile preflight, and a post-install retry for image-contributed profiles |
 | 2026-08-03 | Committed the read-only doctor | Commit `9f85bbf` adds the CLI and fake-driven checks; its Android command allowlist is version, list, and acceleration diagnostics only |
 | 2026-08-03 | Completed final M10 validation | Full race tests with coverage, vet, lint with and without the integration tag, native and Windows builds, tagged example, module tidy/verify, formatting, YAML parsing, diff checks, and govulncheck pass; final council and API audits have no unresolved blockers |
+| 2026-08-25 | Added the disk-capacity preflight | Characterized the untested AVD metadata resolution paths, moved them to `internal/androidsdk` behind `AVDConfig`, and added `checkDiskSpace`; the emulator's 1.2x userdata requirement and its creation-only semantics were measured against emulator 36.6.11.0 rather than inferred, and CI now cross-compiles the build-tagged hosts |
+| 2026-08-25 | Closed the code-council findings | The 1.2x multiplier, the 6 GiB floor and its exact 6143M/6144M/6145M boundary, the creation-only gate, and the size grammar were all confirmed against emulator 36.6.11.0 by disassembling its space check; the grammar was corrected to mirror the emulator's strictness after `7GiB` and `+7G` were found to be honoured by the emulator but rejected here, which under-reported the requirement |
+
+| 2026-08-26 | Attached the emulator's own output to startup failures | The emulator writes every ERROR and FATAL to stdout with stderr at zero bytes, and issues one write(2) per log line over a pipe, so nothing is lost to buffering; capture uses two explicit pipes because os/exec wraps a non-file writer in a copying goroutine that Wait blocks on, measured still blocked 60s after the emulator was reaped because crashpad_handler escapes the process group and session while holding both descriptors |
 
 ## Next Action
 
-M10 is complete locally. Keep every commit local until the user explicitly
-requests a push. A later, separately authorized live integration run should
-provision and use one 720x1280 `small_phone`, non-Play `google_apis`
-host-native AVD, run serially, and stop if host pressure returns. Push, PR
-creation, or other GitHub changes require a new user request.
+Phase 11 adds the disk-capacity preflight on `feat/doctor-disk-capacity-check`,
+authorized for push and PR by the maintainer on 2026-08-25. Two related items
+were planned alongside it and are not started: attaching the emulator's own
+startup output to boot failures, since `emulator.Start` currently sends it to
+os.Stdout and returns a bare exit status; and a composite action plus an
+emulator job for this repository's own CI, which today never boots an emulator
+at all.
+
+A later, separately authorized live integration run should provision and use
+one 720x1280 `small_phone`, non-Play `google_apis` host-native AVD, run
+serially, and stop if host pressure returns.

@@ -150,12 +150,11 @@ func TestVerifyAVDConfigUsesRealARMCPUAndABIValues(t *testing.T) {
 	root, home := t.TempDir(), t.TempDir()
 	installImage(t, root, 35, "google_apis", "arm64-v8a")
 	writeAVD(t, home, "arm_test", 35, "google_apis", "arm64-v8a", "small_phone", "\n")
-	configPath := filepath.Join(home, "arm_test.avd", "config.ini")
 	profile, err := normalizeAVDProfile(AVDProfile{Name: "arm_test", APILevel: 35}, "darwin", "arm64")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := verifyAVDConfig(configPath, root, &profile); err != nil {
+	if err := verifyAVDConfig(loadAVDValues(t, "arm_test", home), root, &profile); err != nil {
 		t.Fatalf("verifyAVDConfig() rejected realistic ARM metadata: %v", err)
 	}
 }
@@ -179,7 +178,7 @@ func TestVerifyAVDConfigRejectsAbsoluteImageFromAnotherSDK(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := verifyAVDConfig(configPath, root, &profile); err == nil || !strings.Contains(err.Error(), "system image directory") {
+	if err := verifyAVDConfig(loadAVDValues(t, "go_test", home), root, &profile); err == nil || !strings.Contains(err.Error(), "system image directory") {
 		t.Fatalf("verifyAVDConfig() error = %v, want SDK-root mismatch", err)
 	}
 }
@@ -205,7 +204,7 @@ func TestVerifyAVDConfigCanonicalizesSymlinkedSDKWithMissingImage(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := verifyAVDConfig(configPath, realRoot, &profile); err != nil {
+	if err := verifyAVDConfig(loadAVDValues(t, "go_test", home), realRoot, &profile); err != nil {
 		t.Fatalf("verifyAVDConfig() rejected equivalent symlinked root: %v", err)
 	}
 }
@@ -643,4 +642,16 @@ func writeAVD(t *testing.T, home, name string, api int, target, arch, device, ne
 	if err := os.WriteFile(filepath.Join(avdDirectory, "config.ini"), []byte(config), 0o644); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// loadAVDValues reads a fixture AVD's config.ini through the same path the
+// production code uses, so verifyAVDConfig is exercised against genuinely
+// parsed metadata rather than a hand-built map.
+func loadAVDValues(t *testing.T, name, home string) map[string]string {
+	t.Helper()
+	metadata, found, err := androidsdk.AVDConfig(name, []string{home})
+	if err != nil || !found {
+		t.Fatalf("AVDConfig(%q) = %v, %v", name, found, err)
+	}
+	return metadata.Values
 }

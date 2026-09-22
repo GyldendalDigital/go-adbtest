@@ -152,7 +152,7 @@ func ensureAVDWithDependencies(ctx context.Context, profile AVDProfile, deps avd
 	if err != nil {
 		return AVD{}, fmt.Errorf("ensure AVD %q: %w", normalized.Name, err)
 	}
-	existingConfig, found, err := findAVDConfig(normalized.Name, homes)
+	existing, found, err := androidsdk.AVDConfig(normalized.Name, homes)
 	if err != nil {
 		return AVD{}, fmt.Errorf("ensure AVD %q: %w", normalized.Name, err)
 	}
@@ -170,7 +170,7 @@ func ensureAVDWithDependencies(ctx context.Context, profile AVDProfile, deps avd
 		)
 	}
 	if found {
-		if err := verifyAVDConfig(existingConfig, root, &normalized); err != nil {
+		if err := verifyAVDConfig(existing.Values, root, &normalized); err != nil {
 			return AVD{}, fmt.Errorf("ensure AVD %q: %w", normalized.Name, err)
 		}
 		if err := ensureSystemImage(ctx, root, &normalized, imagePackage, deps); err != nil {
@@ -545,14 +545,14 @@ func registeredAVDMatches(
 	if !containsExactString(listedAVDs, name) {
 		return false, nil
 	}
-	configPath, found, err := findAVDConfig(name, homes)
+	metadata, found, err := androidsdk.AVDConfig(name, homes)
 	if err != nil {
 		return false, err
 	}
 	if !found {
 		return false, fmt.Errorf("emulator lists the AVD but its config.ini was not found")
 	}
-	if err := verifyAVDConfig(configPath, sdkRoot, profile); err != nil {
+	if err := verifyAVDConfig(metadata.Values, sdkRoot, profile); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -567,48 +567,7 @@ func containsExactString(values []string, expected string) bool {
 	return false
 }
 
-func findAVDConfig(name string, homes []string) (configPath string, found bool, err error) {
-	for _, home := range homes {
-		if strings.TrimSpace(home) == "" {
-			continue
-		}
-		metadataPath := filepath.Join(home, name+".ini")
-		metadata, err := readRegularFile(metadataPath)
-		if err == nil {
-			values := parseINI(metadata)
-			avdPath := strings.TrimSpace(values["path"])
-			if avdPath == "" {
-				if relative := strings.TrimSpace(values["path.rel"]); relative != "" {
-					avdPath = filepath.Join(filepath.Dir(home), filepath.FromSlash(relative))
-				}
-			}
-			if avdPath == "" {
-				return "", false, fmt.Errorf("AVD metadata %q has no path", metadataPath)
-			}
-			if !filepath.IsAbs(avdPath) {
-				avdPath = filepath.Join(home, avdPath)
-			}
-			configPath := filepath.Join(filepath.Clean(avdPath), "config.ini")
-			if configInfo, statErr := os.Stat(configPath); statErr != nil {
-				return "", false, fmt.Errorf("AVD metadata %q points to missing config %q: %w", metadataPath, configPath, statErr)
-			} else if !configInfo.Mode().IsRegular() {
-				return "", false, fmt.Errorf("AVD config %q is not a regular file", configPath)
-			}
-			return configPath, true, nil
-		}
-		if !errors.Is(err, os.ErrNotExist) {
-			return "", false, fmt.Errorf("read AVD metadata %q: %w", metadataPath, err)
-		}
-	}
-	return "", false, nil
-}
-
-func verifyAVDConfig(configPath, sdkRoot string, profile *AVDProfile) error {
-	data, err := readRegularFile(configPath)
-	if err != nil {
-		return fmt.Errorf("read existing config %q: %w", configPath, err)
-	}
-	values := parseINI(data)
+func verifyAVDConfig(values map[string]string, sdkRoot string, profile *AVDProfile) error {
 	wantImageDirectory := systemImageDirectory(sdkRoot, profile)
 	gotImageDirectory := configuredImageDirectory(sdkRoot, values["image.sysdir.1"])
 
@@ -642,33 +601,6 @@ func verifyAVDConfig(configPath, sdkRoot string, profile *AVDProfile) error {
 		)
 	}
 	return nil
-}
-
-func readRegularFile(path string) ([]byte, error) {
-	info, err := os.Stat(path)
-	if err != nil {
-		return nil, err
-	}
-	if !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("%q is not a regular file", path)
-	}
-	return os.ReadFile(path) //nolint:gosec // Callers restrict paths to Android SDK/AVD metadata.
-}
-
-func parseINI(data []byte) map[string]string {
-	values := make(map[string]string)
-	for _, line := range strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";") {
-			continue
-		}
-		key, value, found := strings.Cut(line, "=")
-		if !found {
-			continue
-		}
-		values[strings.TrimSpace(key)] = strings.TrimSpace(value)
-	}
-	return values
 }
 
 func configuredImageDirectory(sdkRoot, configured string) string {

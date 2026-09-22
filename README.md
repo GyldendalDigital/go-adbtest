@@ -25,13 +25,102 @@ adbtest doctor --avd small_phone_api_35
 
 `adbtest doctor` is read-only. It runs sequential, bounded checks for Go, the
 Android SDK root, `adb`, the emulator, Command-line Tools, the requested
-hardware profile, VM acceleration, configured AVD names, and optional `aapt`.
+hardware profile, VM acceleration, configured AVD names, free space for the
+AVD's userdata partition, and optional `aapt`.
 It does not start an emulator or ADB server, contact a device or package
 repository, install packages, accept licences, or change an AVD. Exit code 0
 means no required check failed (warnings are allowed), 1 means the environment
 is not ready, and 2 means the command or its arguments could not be processed.
 Use `--device-profile ID` when provisioning something other than the default
 `small_phone` hardware profile.
+
+### Free space for the userdata partition
+
+The emulator refuses to create an AVD's userdata partition unless the
+filesystem holding the AVD content directory has **1.2x** the configured
+`disk.dataPartition.size` free. It reports the shortfall as `Not enough space
+to create userdata partition`, but that goes to the emulator's own output,
+which `emulator.Start` writes to stdout rather than attaching to the error.
+What a go-adbtest log shows instead is `emulator process exited before its
+serial was detected` — but that error now carries the emulator's own account of
+what happened; see [When the emulator fails to
+start](#when-the-emulator-fails-to-start).
+
+Two figures are worth budgeting for, and they differ by provenance:
+
+| AVD | `disk.dataPartition.size` | Free space needed |
+| --- | --- | --- |
+| Created by `EnsureAVD` or `avdmanager` | `10G` | **12.0 GiB** |
+| No configured size (the emulator's default) | 6 GiB | **7.2 GiB** |
+| Configured below 6 GiB, e.g. `2G` | raised to 6 GiB | **7.2 GiB** |
+
+Lowering `disk.dataPartition.size` below 6 GiB does not shrink the requirement:
+the emulator raises anything smaller to its own minimum and writes the raised
+value back into `config.ini`.
+
+`adbtest doctor --avd NAME` compares that AVD's own configuration against the
+free space where its files live. Without `--avd` it reports free space against
+the smallest requirement any AVD can have, and never fails, because it cannot
+know which AVD will be booted.
+
+The emulator applies this check only when it **creates** the partition, so an
+AVD that has already booted keeps working below the threshold and doctor
+reports it as a warning rather than a failure. This is why the problem tends to
+appear on ephemeral CI runners and never on a workstation.
+
+On macOS the figure is `statfs`'s unprivileged-available space, which is what
+`df` reports rather than what Finder shows, since Finder adds purgeable space
+and Time Machine local snapshots. Expect doctor's number to be the lower one.
+The emulator's own check was measured on Linux, so treat a macOS verdict as
+indicative rather than exact.
+
+### When the emulator fails to start
+
+When `Setup` or `emulator.Start` fails before the device is usable, the returned
+error carries the emulator's own recent output as well as the exit status:
+
+```
+emulator process exited before its serial was detected: exit status 1
+last emulator output:
+INFO         | Android emulator version 36.6.11.0 (build_id 15507667) (CL:N/A)
+INFO         | Graphics backend: gfxstream
+INFO         | Increasing RAM size to 2560MB
+WARNING      | Feature QuickbootFileBacked is disabled due to stability issues...
+FATAL        | Not enough space to create userdata partition. Available: 3156.88 MB at /run/user/1000/ci.avd, need 245760.00 MB.
+```
+
+The output is still streamed live to stdout and stderr, on the same streams the
+emulator wrote it to. One difference from before: the emulator now writes to a
+pipe rather than to whatever the parent's descriptors pointed at, so an
+interactive run receives its output in blocks rather than line by line. That
+does not affect a failing start — the emulator flushes on exit, and its own
+logger issues one write per line once it is initialised — nor CI, where stdout
+was already a pipe. What is new is that a copy is retained
+and attached to the error, because the live copy scrolls past in a CI log a long
+way from the failure a consumer actually handles.
+
+Every hard startup failure is short — 18 lines or fewer — so the tail above is
+the whole log. Some failures are not like that. An unsupported `-gpu` value
+reports at line 6 of more than a hundred and the emulator carries on booting,
+so that line is lifted out and shown first:
+
+```
+emulator emulator-5554 did not boot: context deadline exceeded
+emulator reported: ERROR        | gpuChoiceBasedOnGpuOptions: Selected GPU option 'bogusmode' is not valid, switching to 'auto' mode.
+last emulator output:
+...
+```
+
+The lifted line is the last `FATAL`, or the **first** error when there is no
+fatal. Not the last error: this emulator logs benign ones late in every run —
+during graphics init, and again on shutdown — so taking the last would name a
+line that had nothing to do with the failure, which is worse than naming
+nothing. It is also omitted when it is already the tail's last line, rather than
+printed twice.
+
+The adb public key is dropped from the retained copy. The emulator logs it
+exactly twice per boot, it carries your user and host name, and it is about a
+sixth of a normal startup log.
 
 ## Quick start
 
@@ -689,8 +778,9 @@ On a persistent self-hosted runner, the library can own an AVD instead. Create
 it once under a stable name—manually or through a separately bounded
 `EnsureAVD` bootstrap step—then check prerequisite health and exact-name
 presence with `adbtest doctor --avd NAME` and pass that name to `HeadlessAVD`.
-Doctor does not validate that AVD's image or lightweight profile; `EnsureAVD`
-does that. Keep the large system-image download out of the normal test hot path
+Doctor reads that AVD's `config.ini` to size its userdata partition, but does
+not validate its image or lightweight profile; `EnsureAVD` does that. Keep the
+large system-image download out of the normal test hot path
 when possible. Do not manually start that same AVD first. In either CI mode,
 keep `go test -p=1` so multiple package-level `TestMain` functions do not
 launch emulators concurrently.

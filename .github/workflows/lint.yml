@@ -3,8 +3,9 @@ name: Lint
 on:
   push:
     branches: [master]
+  # Every pull request, whatever it targets. Filtering on master meant a pull
+  # request stacked on another branch ran no checks at all and merged unverified.
   pull_request:
-    branches: [master]
 
 permissions:
   contents: read
@@ -16,9 +17,14 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # Pinned to the module's own baseline rather than stable. golangci-lint is
+      # pinned below, and its typechecker cannot read a standard library newer
+      # than the Go it was built with: Go 1.27 becoming stable broke this job on
+      # master with errors inside crypto/internal/randutil, nothing to do with
+      # this repository's code. The test job in ci.yml pins the same way.
       - uses: actions/setup-go@v7
         with:
-          go-version: stable
+          go-version: '1.23.x'
 
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v9
