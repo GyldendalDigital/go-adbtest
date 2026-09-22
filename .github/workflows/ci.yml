@@ -3,8 +3,9 @@ name: CI
 on:
   push:
     branches: [master]
+  # Every pull request, whatever it targets. Filtering on master meant a pull
+  # request stacked on another branch ran no checks at all and merged unverified.
   pull_request:
-    branches: [master]
 
 permissions:
   contents: read

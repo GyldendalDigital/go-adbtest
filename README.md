@@ -42,7 +42,9 @@ filesystem holding the AVD content directory has **1.2x** the configured
 to create userdata partition`, but that goes to the emulator's own output,
 which `emulator.Start` writes to stdout rather than attaching to the error.
 What a go-adbtest log shows instead is `emulator process exited before its
-serial was detected`, which reads like a crash or a slow boot and is neither.
+serial was detected` — but that error now carries the emulator's own account of
+what happened; see [When the emulator fails to
+start](#when-the-emulator-fails-to-start).
 
 Two figures are worth budgeting for, and they differ by provenance:
 
@@ -71,6 +73,54 @@ On macOS the figure is `statfs`'s unprivileged-available space, which is what
 and Time Machine local snapshots. Expect doctor's number to be the lower one.
 The emulator's own check was measured on Linux, so treat a macOS verdict as
 indicative rather than exact.
+
+### When the emulator fails to start
+
+When `Setup` or `emulator.Start` fails before the device is usable, the returned
+error carries the emulator's own recent output as well as the exit status:
+
+```
+emulator process exited before its serial was detected: exit status 1
+last emulator output:
+INFO         | Android emulator version 36.6.11.0 (build_id 15507667) (CL:N/A)
+INFO         | Graphics backend: gfxstream
+INFO         | Increasing RAM size to 2560MB
+WARNING      | Feature QuickbootFileBacked is disabled due to stability issues...
+FATAL        | Not enough space to create userdata partition. Available: 3156.88 MB at /run/user/1000/ci.avd, need 245760.00 MB.
+```
+
+The output is still streamed live to stdout and stderr, on the same streams the
+emulator wrote it to. One difference from before: the emulator now writes to a
+pipe rather than to whatever the parent's descriptors pointed at, so an
+interactive run receives its output in blocks rather than line by line. That
+does not affect a failing start — the emulator flushes on exit, and its own
+logger issues one write per line once it is initialised — nor CI, where stdout
+was already a pipe. What is new is that a copy is retained
+and attached to the error, because the live copy scrolls past in a CI log a long
+way from the failure a consumer actually handles.
+
+Every hard startup failure is short — 18 lines or fewer — so the tail above is
+the whole log. Some failures are not like that. An unsupported `-gpu` value
+reports at line 6 of more than a hundred and the emulator carries on booting,
+so that line is lifted out and shown first:
+
+```
+emulator emulator-5554 did not boot: context deadline exceeded
+emulator reported: ERROR        | gpuChoiceBasedOnGpuOptions: Selected GPU option 'bogusmode' is not valid, switching to 'auto' mode.
+last emulator output:
+...
+```
+
+The lifted line is the last `FATAL`, or the **first** error when there is no
+fatal. Not the last error: this emulator logs benign ones late in every run —
+during graphics init, and again on shutdown — so taking the last would name a
+line that had nothing to do with the failure, which is worse than naming
+nothing. It is also omitted when it is already the tail's last line, rather than
+printed twice.
+
+The adb public key is dropped from the retained copy. The emulator logs it
+exactly twice per boot, it carries your user and host name, and it is about a
+sixth of a normal startup log.
 
 ## Quick start
 

@@ -195,6 +195,8 @@ socket/forward ownership, current emulator GPU defaults, and all lint findings.
 | 2026-08-25 | Added the disk-capacity preflight | Characterized the untested AVD metadata resolution paths, moved them to `internal/androidsdk` behind `AVDConfig`, and added `checkDiskSpace`; the emulator's 1.2x userdata requirement and its creation-only semantics were measured against emulator 36.6.11.0 rather than inferred, and CI now cross-compiles the build-tagged hosts |
 | 2026-08-25 | Closed the code-council findings | The 1.2x multiplier, the 6 GiB floor and its exact 6143M/6144M/6145M boundary, the creation-only gate, and the size grammar were all confirmed against emulator 36.6.11.0 by disassembling its space check; the grammar was corrected to mirror the emulator's strictness after `7GiB` and `+7G` were found to be honoured by the emulator but rejected here, which under-reported the requirement |
 
+| 2026-08-26 | Attached the emulator's own output to startup failures | The emulator writes every ERROR and FATAL to stdout with stderr at zero bytes, and issues one write(2) per log line over a pipe, so nothing is lost to buffering; capture uses two explicit pipes because os/exec wraps a non-file writer in a copying goroutine that Wait blocks on, measured still blocked 60s after the emulator was reaped because crashpad_handler escapes the process group and session while holding both descriptors |
+
 ## Next Action
 
 Phase 11 adds the disk-capacity preflight on `feat/doctor-disk-capacity-check`,

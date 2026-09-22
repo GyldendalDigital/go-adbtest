@@ -125,6 +125,23 @@ used deterministic no-emulator validation. Detailed status lives in
   point, with the previously untested resolution paths characterized first
 - [x] Cross-compilation of the build-tagged hosts added to CI
 
+## Phase 12: Startup Failure Diagnostics
+> Make a failed boot explain itself, including the failures no preflight can
+> predict.
+
+- [x] The emulator's stdout and stderr are retained in a bounded ring and
+  attached to startup-failure errors
+- [x] Live streaming to stdout and stderr is unchanged, and the two streams stay
+  separate
+- [x] The explanation is lifted out of the log wherever it appeared, not just
+  from the tail: the last `FATAL`, or the first error when there is none, since
+  this emulator logs benign errors late in every run
+- [x] `Wait`, `Kill` and teardown timing are unchanged: the emulator is handed
+  descriptors directly rather than through an `os/exec` copying goroutine
+- [x] A descendant that escapes the process group cannot park the failure path,
+  a reader goroutine, or a descriptor
+- [x] The adb public key is dropped from the retained copy
+
 ---
 
 ## Non-Goals (v1)
